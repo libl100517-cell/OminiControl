@@ -173,7 +173,7 @@ class FillMaskDataset(Dataset):
 
         drop_text = random.random() < self.drop_text_prob
         drop_image = random.random() < self.drop_image_prob
-        description = "" if drop_text else ""
+        description = "" if drop_text else "crack"
         if drop_image:
             condition_img = Image.new("RGB", self.condition_size, (0, 0, 0))
 
@@ -254,7 +254,7 @@ def test_function(model, save_path, file_name):
                 condition_img, Image.new("RGB", condition_img.size, (0, 0, 0)), mask
             )
         condition = Condition(condition_img, adapter, position_delta, position_scale)
-        prompt = "" if dataset_type == "fill_mask" else "A beautiful vase on a table."
+        prompt = "crack" if dataset_type == "fill_mask" else "A beautiful vase on a table."
         test_list.append((condition, prompt))
     elif condition_type == "super_resolution":
         image = Image.open("assets/vase_hq.jpg")
