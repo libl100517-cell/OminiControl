@@ -130,23 +130,30 @@ class FillMaskDataset(Dataset):
 
     def _load_paths(self, list_file: str) -> list[str]:
         with open(list_file, "r", encoding="utf-8") as handle:
-            return [line.strip() for line in handle if line.strip()]
+            return [self._normalize_path(line.strip()) for line in handle if line.strip()]
+
+    @staticmethod
+    def _normalize_path(relative_path: str) -> str:
+        return relative_path.replace("\\", "/")
 
     def _mask_path(self, relative_path: str) -> Path:
-        parts = Path(relative_path).parts
+        normalized_path = self._normalize_path(relative_path)
+        path = Path(normalized_path)
+        parts = path.parts
         if "images" not in parts:
             raise ValueError(
                 f"Expected 'images' in path for mask replacement: {relative_path}"
             )
         replaced = ["masks" if part == "images" else part for part in parts]
-        return self.root_dir.joinpath(*replaced)
+        return self.root_dir.joinpath(*replaced).with_suffix(".png")
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
         relative_path = self.image_paths[idx]
-        image_path = self.root_dir / relative_path
+        normalized_path = self._normalize_path(relative_path)
+        image_path = self.root_dir / normalized_path
         mask_path = self._mask_path(relative_path)
 
         image = Image.open(image_path).convert("RGB")
@@ -206,19 +213,49 @@ def test_function(model, save_path, file_name):
         condition = Condition(image, adapter, position_delta, position_scale)
         test_list.append((condition, "A beautiful vase on a table."))
     elif condition_type == "fill":
-        condition_img = (
-            Image.open("./assets/vase_hq.jpg").resize(condition_size).convert("RGB")
-        )
-        mask = Image.new("L", condition_img.size, 0)
-        draw = ImageDraw.Draw(mask)
-        a = condition_img.size[0] // 4
-        b = a * 3
-        draw.rectangle([a, a, b, b], fill=255)
-        condition_img = Image.composite(
-            condition_img, Image.new("RGB", condition_img.size, (0, 0, 0)), mask
-        )
-        condition = Condition(condition, adapter, position_delta, position_scale)
-        test_list.append((condition, "A beautiful vase on a table."))
+        dataset_type = model.training_config["dataset"].get("type")
+        if dataset_type == "fill_mask":
+            list_file = model.training_config["dataset"]["list_file"]
+            root_dir = Path(model.training_config["dataset"]["root_dir"])
+            with open(list_file, "r", encoding="utf-8") as handle:
+                relative_path = next(
+                    (line.strip() for line in handle if line.strip()), None
+                )
+            if not relative_path:
+                raise ValueError("fill_mask list_file is empty.")
+            normalized_path = FillMaskDataset._normalize_path(relative_path)
+            image_path = root_dir / normalized_path
+            parts = Path(normalized_path).parts
+            if "images" not in parts:
+                raise ValueError(
+                    f"Expected 'images' in path for mask replacement: {relative_path}"
+                )
+            replaced = ["masks" if part == "images" else part for part in parts]
+            mask_path = root_dir.joinpath(*replaced)
+
+            image = Image.open(image_path).convert("RGB").resize(condition_size)
+            mask = Image.open(mask_path).convert("L")
+            if mask.size != image.size:
+                mask = mask.resize(image.size, Image.NEAREST)
+            mask = mask.point(lambda v: 255 if v > 0 else 0)
+            condition_img = Image.composite(
+                Image.new("RGB", image.size, (0, 0, 0)), image, mask
+            )
+        else:
+            condition_img = (
+                Image.open("./assets/vase_hq.jpg").resize(condition_size).convert("RGB")
+            )
+            mask = Image.new("L", condition_img.size, 0)
+            draw = ImageDraw.Draw(mask)
+            a = condition_img.size[0] // 4
+            b = a * 3
+            draw.rectangle([a, a, b, b], fill=255)
+            condition_img = Image.composite(
+                condition_img, Image.new("RGB", condition_img.size, (0, 0, 0)), mask
+            )
+        condition = Condition(condition_img, adapter, position_delta, position_scale)
+        prompt = "" if dataset_type == "fill_mask" else "A beautiful vase on a table."
+        test_list.append((condition, prompt))
     elif condition_type == "super_resolution":
         image = Image.open("assets/vase_hq.jpg")
         image = image.resize(condition_size)
