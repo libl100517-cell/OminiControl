@@ -138,13 +138,14 @@ class FillMaskDataset(Dataset):
 
     def _mask_path(self, relative_path: str) -> Path:
         normalized_path = self._normalize_path(relative_path)
-        parts = Path(normalized_path).parts
+        path = Path(normalized_path)
+        parts = path.parts
         if "images" not in parts:
             raise ValueError(
                 f"Expected 'images' in path for mask replacement: {relative_path}"
             )
         replaced = ["masks" if part == "images" else part for part in parts]
-        return self.root_dir.joinpath(*replaced)
+        return self.root_dir.joinpath(*replaced).with_suffix(".png")
 
     def __len__(self):
         return len(self.image_paths)
