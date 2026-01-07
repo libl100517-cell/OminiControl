@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from datasets import load_dataset
+# from datasets import load_dataset
 
 from .trainer import OminiModel, get_config, train
 from ..pipeline.flux_omini import Condition, convert_to_condition, generate
@@ -262,26 +262,26 @@ def main():
             drop_text_prob=dataset_config["drop_text_prob"],
             drop_image_prob=dataset_config["drop_image_prob"],
         )
-    else:
-        # Load dataset text-to-image-2M
-        dataset = load_dataset(
-            "webdataset",
-            data_files={"train": dataset_config["urls"]},
-            split="train",
-            cache_dir="cache/t2i2m",
-            num_proc=32,
-        )
+    # else:
+    #     # Load dataset text-to-image-2M
+    #     dataset = load_dataset(
+    #         "webdataset",
+    #         data_files={"train": dataset_config["urls"]},
+    #         split="train",
+    #         cache_dir="cache/t2i2m",
+    #         num_proc=32,
+    #     )
 
-        # Initialize custom dataset
-        dataset = ImageConditionDataset(
-            dataset,
-            condition_size=dataset_config["condition_size"],
-            target_size=dataset_config["target_size"],
-            condition_type=training_config["condition_type"],
-            drop_text_prob=dataset_config["drop_text_prob"],
-            drop_image_prob=dataset_config["drop_image_prob"],
-            position_scale=dataset_config.get("position_scale", 1.0),
-        )
+        # # Initialize custom dataset
+        # dataset = ImageConditionDataset(
+        #     dataset,
+        #     condition_size=dataset_config["condition_size"],
+        #     target_size=dataset_config["target_size"],
+        #     condition_type=training_config["condition_type"],
+        #     drop_text_prob=dataset_config["drop_text_prob"],
+        #     drop_image_prob=dataset_config["drop_image_prob"],
+        #     position_scale=dataset_config.get("position_scale", 1.0),
+        # )
 
     # Initialize model
     trainable_model = OminiModel(

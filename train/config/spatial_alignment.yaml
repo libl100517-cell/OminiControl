@@ -1,4 +1,4 @@
-flux_path: "black-forest-labs/FLUX.1-dev"
+flux_path: "/home/libaoluo/sam2/OminiControl/flux"
 dtype: "bfloat16"
 
 model:
@@ -15,9 +15,9 @@ train:
 
   # Specify the type of condition to use. 
   # Options: ["canny", "coloring", "deblurring", "depth", "depth_pred", "fill"]
-  condition_type: "canny"
+  condition_type: "fill"
   dataset:
-    type: "img" # "fill_mask" to use image/mask list files
+    type: "fill_mask" # "fill_mask" to use image/mask list files
     urls:
       # (Uncomment the following lines to use more data)
       # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000040.tar"
@@ -25,8 +25,8 @@ train:
       # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000042.tar"
       # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000043.tar"
       # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000044.tar"
-      - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000045.tar"
-      - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000046.tar"
+      # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000045.tar"
+      # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000046.tar"
     cache_name: "data_512_2M"
     condition_size: 
       - 512
@@ -37,8 +37,8 @@ train:
     drop_text_prob: 0.1
     drop_image_prob: 0.1
     # For fill_mask datasets:
-    # list_file: "/home/libaoluo/sam2/train_diffuser.txt"
-    # root_dir: "/home/libaoluo/dataset/opensourse_datasets"
+    list_file: "/home/libaoluo/sam2/train_diffuser.txt"
+    root_dir: "/home/libaoluo/dataset/opensourse_datasets"
 
 
   wandb:
