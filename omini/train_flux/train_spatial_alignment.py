@@ -4,6 +4,7 @@ import torchvision.transforms as T
 import os
 import random
 import numpy as np
+from pathlib import Path
 
 from PIL import Image, ImageDraw
 
@@ -104,6 +105,83 @@ class ImageConditionDataset(Dataset):
         }
 
 
+class FillMaskDataset(Dataset):
+    def __init__(
+        self,
+        list_file: str,
+        root_dir: str,
+        condition_size=(512, 512),
+        target_size=(512, 512),
+        condition_type: str = "fill",
+        drop_text_prob: float = 0.1,
+        drop_image_prob: float = 0.1,
+        return_pil_image: bool = False,
+    ):
+        self.root_dir = Path(root_dir)
+        self.image_paths = self._load_paths(list_file)
+        self.condition_size = condition_size
+        self.target_size = target_size
+        self.condition_type = condition_type
+        self.drop_text_prob = drop_text_prob
+        self.drop_image_prob = drop_image_prob
+        self.return_pil_image = return_pil_image
+
+        self.to_tensor = T.ToTensor()
+
+    def _load_paths(self, list_file: str) -> list[str]:
+        with open(list_file, "r", encoding="utf-8") as handle:
+            return [line.strip() for line in handle if line.strip()]
+
+    def _mask_path(self, relative_path: str) -> Path:
+        parts = Path(relative_path).parts
+        if "images" not in parts:
+            raise ValueError(
+                f"Expected 'images' in path for mask replacement: {relative_path}"
+            )
+        replaced = ["masks" if part == "images" else part for part in parts]
+        return self.root_dir.joinpath(*replaced)
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        relative_path = self.image_paths[idx]
+        image_path = self.root_dir / relative_path
+        mask_path = self._mask_path(relative_path)
+
+        image = Image.open(image_path).convert("RGB")
+        mask = Image.open(mask_path).convert("L")
+        if mask.size != image.size:
+            mask = mask.resize(image.size, Image.NEAREST)
+        mask = mask.point(lambda v: 255 if v > 0 else 0)
+
+        masked_image = Image.composite(
+            Image.new("RGB", image.size, (0, 0, 0)),
+            image,
+            mask,
+        )
+
+        image = image.resize(self.target_size)
+        condition_img = masked_image.resize(self.condition_size)
+
+        drop_text = random.random() < self.drop_text_prob
+        drop_image = random.random() < self.drop_image_prob
+        description = "" if drop_text else ""
+        if drop_image:
+            condition_img = Image.new("RGB", self.condition_size, (0, 0, 0))
+
+        position_delta = np.array([0, 0])
+
+        return {
+            "image": self.to_tensor(image),
+            "condition_0": self.to_tensor(condition_img),
+            "condition_type_0": self.condition_type,
+            "position_delta_0": position_delta,
+            "description": description,
+            **({"pil_image": [image, condition_img]} if self.return_pil_image else {}),
+        }
+
+
 @torch.no_grad()
 def test_function(model, save_path, file_name):
     condition_size = model.training_config["dataset"]["condition_size"]
@@ -173,25 +251,37 @@ def main():
     training_config = config["train"]
     torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
 
-    # Load dataset text-to-image-2M
-    dataset = load_dataset(
-        "webdataset",
-        data_files={"train": training_config["dataset"]["urls"]},
-        split="train",
-        cache_dir="cache/t2i2m",
-        num_proc=32,
-    )
+    dataset_config = training_config["dataset"]
+    if dataset_config.get("type") == "fill_mask":
+        dataset = FillMaskDataset(
+            list_file=dataset_config["list_file"],
+            root_dir=dataset_config["root_dir"],
+            condition_size=dataset_config["condition_size"],
+            target_size=dataset_config["target_size"],
+            condition_type=training_config["condition_type"],
+            drop_text_prob=dataset_config["drop_text_prob"],
+            drop_image_prob=dataset_config["drop_image_prob"],
+        )
+    else:
+        # Load dataset text-to-image-2M
+        dataset = load_dataset(
+            "webdataset",
+            data_files={"train": dataset_config["urls"]},
+            split="train",
+            cache_dir="cache/t2i2m",
+            num_proc=32,
+        )
 
-    # Initialize custom dataset
-    dataset = ImageConditionDataset(
-        dataset,
-        condition_size=training_config["dataset"]["condition_size"],
-        target_size=training_config["dataset"]["target_size"],
-        condition_type=training_config["condition_type"],
-        drop_text_prob=training_config["dataset"]["drop_text_prob"],
-        drop_image_prob=training_config["dataset"]["drop_image_prob"],
-        position_scale=training_config["dataset"].get("position_scale", 1.0),
-    )
+        # Initialize custom dataset
+        dataset = ImageConditionDataset(
+            dataset,
+            condition_size=dataset_config["condition_size"],
+            target_size=dataset_config["target_size"],
+            condition_type=training_config["condition_type"],
+            drop_text_prob=dataset_config["drop_text_prob"],
+            drop_image_prob=dataset_config["drop_image_prob"],
+            position_scale=dataset_config.get("position_scale", 1.0),
+        )
 
     # Initialize model
     trainable_model = OminiModel(
