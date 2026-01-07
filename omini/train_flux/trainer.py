@@ -5,6 +5,7 @@ import torch
 import wandb
 import os
 import yaml
+import time
 from lightning.pytorch.callbacks import ModelCheckpoint
 from peft import LoraConfig, get_peft_model_state_dict
 from torch.utils.data import DataLoader
@@ -275,6 +276,10 @@ class TrainingCallback(L.Callback):
         self.total_steps = 0
         self.test_function = test_function
         self._log_header_written = False
+        self._start_time = None
+        self._total_step_time = 0.0
+        self._timed_steps = 0
+        self._last_step_time = None
 
     def _write_log_header(self):
         if self._log_header_written:
@@ -290,20 +295,50 @@ class TrainingCallback(L.Callback):
                     "loss",
                     "gradient_size",
                     "max_gradient_size",
+                    "elapsed_seconds",
+                    "eta_seconds",
                 ]
             )
         self._log_header_written = True
 
-    def _append_log_row(self, epoch, step, batch_idx, loss, gradient_size, max_grad):
+    def _append_log_row(
+        self,
+        epoch,
+        step,
+        batch_idx,
+        loss,
+        gradient_size,
+        max_grad,
+        elapsed_seconds,
+        eta_seconds,
+    ):
         if not self._log_header_written:
             self._write_log_header()
         with open(self.log_file, "a", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(
-                [epoch, step, batch_idx, f"{loss:.6f}", f"{gradient_size:.6f}", f"{max_grad:.6f}"]
+                [
+                    epoch,
+                    step,
+                    batch_idx,
+                    f"{loss:.6f}",
+                    f"{gradient_size:.6f}",
+                    f"{max_grad:.6f}",
+                    f"{elapsed_seconds:.2f}",
+                    f"{eta_seconds:.2f}",
+                ]
             )
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        now = time.time()
+        if self._start_time is None:
+            self._start_time = now
+        if self._last_step_time is not None:
+            step_time = now - self._last_step_time
+            self._total_step_time += step_time
+            self._timed_steps += 1
+        self._last_step_time = now
+
         gradient_size = 0
         max_gradient_size = 0
         count = 0
@@ -331,9 +366,33 @@ class TrainingCallback(L.Callback):
             wandb.log(report_dict)
 
         if self.total_steps % self.print_every_n_steps == 0:
-            print(
-                f"Epoch: {trainer.current_epoch}, Steps: {self.total_steps}, Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}, Gradient size: {gradient_size:.4f}, Max gradient size: {max_gradient_size:.4f}"
+            elapsed_seconds = now - self._start_time if self._start_time else 0.0
+            avg_step_time = (
+                self._total_step_time / self._timed_steps if self._timed_steps else 0.0
             )
+            if trainer.max_steps is not None and trainer.max_steps > 0:
+                remaining_steps = max(trainer.max_steps - self.total_steps, 0)
+                eta_seconds = remaining_steps * avg_step_time
+            else:
+                eta_seconds = 0.0
+            print(
+                "Epoch: "
+                f"{trainer.current_epoch}, Steps: {self.total_steps}, "
+                f"Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}, "
+                f"Gradient size: {gradient_size:.4f}, Max gradient size: "
+                f"{max_gradient_size:.4f}, Elapsed: {elapsed_seconds:.1f}s, "
+                f"ETA: {eta_seconds:.1f}s"
+            )
+
+        elapsed_seconds = now - self._start_time if self._start_time else 0.0
+        avg_step_time = (
+            self._total_step_time / self._timed_steps if self._timed_steps else 0.0
+        )
+        if trainer.max_steps is not None and trainer.max_steps > 0:
+            remaining_steps = max(trainer.max_steps - self.total_steps, 0)
+            eta_seconds = remaining_steps * avg_step_time
+        else:
+            eta_seconds = 0.0
 
         self._append_log_row(
             trainer.current_epoch,
@@ -342,6 +401,8 @@ class TrainingCallback(L.Callback):
             outputs["loss"].item() * trainer.accumulate_grad_batches,
             gradient_size,
             max_gradient_size,
+            elapsed_seconds,
+            eta_seconds,
         )
 
         # Save LoRA weights at specified intervals
