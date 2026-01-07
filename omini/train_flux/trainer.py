@@ -1,9 +1,11 @@
+import csv
 import lightning as L
 from diffusers.pipelines import FluxPipeline
 import torch
 import wandb
 import os
 import yaml
+from lightning.pytorch.callbacks import ModelCheckpoint
 from peft import LoraConfig, get_peft_model_state_dict
 from torch.utils.data import DataLoader
 import time
@@ -263,6 +265,7 @@ class TrainingCallback(L.Callback):
         self.save_interval = training_config.get("save_interval", 1000)
         self.sample_interval = training_config.get("sample_interval", 1000)
         self.save_path = training_config.get("save_path", "./output")
+        self.log_file = os.path.join(self.save_path, self.run_name, "train_log.csv")
 
         self.wandb_config = training_config.get("wandb", None)
         self.use_wandb = (
@@ -271,6 +274,34 @@ class TrainingCallback(L.Callback):
 
         self.total_steps = 0
         self.test_function = test_function
+        self._log_header_written = False
+
+    def _write_log_header(self):
+        if self._log_header_written:
+            return
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+        with open(self.log_file, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "epoch",
+                    "step",
+                    "batch",
+                    "loss",
+                    "gradient_size",
+                    "max_gradient_size",
+                ]
+            )
+        self._log_header_written = True
+
+    def _append_log_row(self, epoch, step, batch_idx, loss, gradient_size, max_grad):
+        if not self._log_header_written:
+            self._write_log_header()
+        with open(self.log_file, "a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [epoch, step, batch_idx, f"{loss:.6f}", f"{gradient_size:.6f}", f"{max_grad:.6f}"]
+            )
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         gradient_size = 0
@@ -303,6 +334,15 @@ class TrainingCallback(L.Callback):
             print(
                 f"Epoch: {trainer.current_epoch}, Steps: {self.total_steps}, Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}, Gradient size: {gradient_size:.4f}, Max gradient size: {max_gradient_size:.4f}"
             )
+
+        self._append_log_row(
+            trainer.current_epoch,
+            self.total_steps,
+            batch_idx,
+            outputs["loss"].item() * trainer.accumulate_grad_batches,
+            gradient_size,
+            max_gradient_size,
+        )
 
         # Save LoRA weights at specified intervals
         if self.total_steps % self.save_interval == 0:
@@ -355,14 +395,25 @@ def train(dataset, trainable_model, config, test_function):
     )
 
     # Callbacks for testing and saving checkpoints
+    callbacks = []
     if is_main_process:
-        callbacks = [TrainingCallback(run_name, training_config, test_function)]
+        callbacks.append(TrainingCallback(run_name, training_config, test_function))
+        if training_config.get("save_checkpoints", False):
+            callbacks.append(
+                ModelCheckpoint(
+                    dirpath=f"{training_config.get('save_path', './output')}/{run_name}/checkpoints",
+                    filename="step{step}",
+                    save_top_k=-1,
+                    save_last=True,
+                    every_n_train_steps=training_config.get("checkpoint_interval", 1000),
+                )
+            )
 
     # Initialize trainer
     trainer = L.Trainer(
         accumulate_grad_batches=training_config["accumulate_grad_batches"],
         callbacks=callbacks if is_main_process else [],
-        enable_checkpointing=False,
+        enable_checkpointing=training_config.get("save_checkpoints", False),
         enable_progress_bar=False,
         logger=False,
         max_steps=training_config.get("max_steps", -1),
@@ -381,4 +432,8 @@ def train(dataset, trainable_model, config, test_function):
             yaml.dump(config, f)
 
     # Start training
-    trainer.fit(trainable_model, train_loader)
+    trainer.fit(
+        trainable_model,
+        train_loader,
+        ckpt_path=training_config.get("resume_from_checkpoint", None),
+    )
