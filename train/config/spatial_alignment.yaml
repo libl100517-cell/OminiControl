@@ -6,6 +6,7 @@ model:
 
 train:
   accumulate_grad_batches: 1
+  batch_size: 1
   dataloader_workers: 5
   save_interval: 1000
   sample_interval: 100

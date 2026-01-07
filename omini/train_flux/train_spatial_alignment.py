@@ -231,7 +231,7 @@ def test_function(model, save_path, file_name):
                     f"Expected 'images' in path for mask replacement: {relative_path}"
                 )
             replaced = ["masks" if part == "images" else part for part in parts]
-            mask_path = root_dir.joinpath(*replaced)
+            mask_path = root_dir.joinpath(*replaced).with_suffix(".png")
 
             image = Image.open(image_path).convert("RGB").resize(condition_size)
             mask = Image.open(mask_path).convert("L")
@@ -254,7 +254,7 @@ def test_function(model, save_path, file_name):
                 condition_img, Image.new("RGB", condition_img.size, (0, 0, 0)), mask
             )
         condition = Condition(condition_img, adapter, position_delta, position_scale)
-        prompt = "crack" if dataset_type == "fill_mask" else "A beautiful vase on a table."
+        prompt = "" if dataset_type == "fill_mask" else "A beautiful vase on a table."
         test_list.append((condition, prompt))
     elif condition_type == "super_resolution":
         image = Image.open("assets/vase_hq.jpg")
