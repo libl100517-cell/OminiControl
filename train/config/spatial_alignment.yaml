@@ -17,7 +17,7 @@ train:
   # Options: ["canny", "coloring", "deblurring", "depth", "depth_pred", "fill"]
   condition_type: "canny"
   dataset:
-    type: "img"
+    type: "img" # "fill_mask" to use image/mask list files
     urls:
       # (Uncomment the following lines to use more data)
       # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000040.tar"
@@ -36,6 +36,9 @@ train:
       - 512
     drop_text_prob: 0.1
     drop_image_prob: 0.1
+    # For fill_mask datasets:
+    # list_file: "/home/libaoluo/sam2/train_diffuser.txt"
+    # root_dir: "/home/libaoluo/dataset/opensourse_datasets"
 
 
   wandb:
