@@ -200,8 +200,8 @@ class OminiModel(L.LightningModule):
                 # Add position delta (see OminiControl)
                 c_ids[:, 1] += p_delta[0][0]
                 c_ids[:, 2] += p_delta[0][1]
-                if len(p_delta) > 1:
-                    print("Warning: only the first position delta is used.")
+                # if len(p_delta) > 1:
+                #     print("Warning: only the first position delta is used.")
                 # Append to the list
                 if latent_mask is not None:
                     c_latents, c_ids = c_latents[latent_mask], c_ids[latent_mask[0]]
