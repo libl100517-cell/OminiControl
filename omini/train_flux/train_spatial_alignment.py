@@ -173,7 +173,7 @@ class FillMaskDataset(Dataset):
 
         drop_text = random.random() < self.drop_text_prob
         drop_image = random.random() < self.drop_image_prob
-        description = "" if drop_text else ""
+        description = "" if drop_text else "crack"
         if drop_image:
             condition_img = Image.new("RGB", self.condition_size, (0, 0, 0))
 
