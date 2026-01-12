@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 import torch
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from .train_spatial_alignment import FillMaskDataset
 from .trainer import get_config
@@ -105,6 +105,7 @@ def main():
         if mask.size != image.size:
             mask = mask.resize(image.size, Image.NEAREST)
         mask = mask.point(lambda v: 255 if v > 0 else 0)
+        mask = mask.filter(ImageFilter.MaxFilter(5))
 
         masked_image = Image.composite(
             Image.new("RGB", image.size, (0, 0, 0)),
