@@ -724,14 +724,23 @@ def generate(
     else:
         latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
         if residual_background is not None and residual_mask is not None:
+            if isinstance(residual_background, Image.Image):
+                residual_background = residual_background.resize(
+                    (width, height), Image.BICUBIC
+                )
             bg_tensor = self.image_processor.preprocess(residual_background)
             bg_tensor = bg_tensor.to(device).to(self.vae.dtype)
             z_bg = self.vae.encode(bg_tensor).latent_dist.sample()
             z_bg = (
                 z_bg - self.vae.config.shift_factor
             ) * self.vae.config.scaling_factor
+            if z_bg.shape[2:] != latents.shape[2:]:
+                z_bg = torch_F.interpolate(
+                    z_bg, size=latents.shape[2:], mode="nearest"
+                )
 
             if isinstance(residual_mask, Image.Image):
+                residual_mask = residual_mask.resize((width, height), Image.NEAREST)
                 mask_tensor = torch.tensor(
                     np.array(residual_mask), device=device, dtype=z_bg.dtype
                 )
