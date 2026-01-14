@@ -10,6 +10,7 @@ from diffusers.pipelines.flux.pipeline_flux import (
     np,
 )
 from diffusers.models.attention_processor import Attention, F
+import torch.nn.functional as torch_F
 from diffusers.models.embeddings import apply_rotary_emb
 from transformers import pipeline
 
@@ -484,6 +485,9 @@ def generate(
     transformer_kwargs: Optional[Dict[str, Any]] = {},
     kv_cache=False,
     latent_mask=None,
+    residual_background: Optional[Union[Image.Image, torch.Tensor]] = None,
+    residual_mask: Optional[Union[Image.Image, torch.Tensor]] = None,
+    residual_alpha: float = 1.0,
     **params: dict,
 ):
     self = pipeline
@@ -719,6 +723,38 @@ def generate(
         image = latents
     else:
         latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+        if residual_background is not None and residual_mask is not None:
+            bg_tensor = self.image_processor.preprocess(residual_background)
+            bg_tensor = bg_tensor.to(device).to(self.vae.dtype)
+            z_bg = self.vae.encode(bg_tensor).latent_dist.sample()
+            z_bg = (
+                z_bg - self.vae.config.shift_factor
+            ) * self.vae.config.scaling_factor
+
+            if isinstance(residual_mask, Image.Image):
+                mask_tensor = torch.tensor(
+                    np.array(residual_mask), device=device, dtype=z_bg.dtype
+                )
+                if mask_tensor.ndim == 2:
+                    mask_tensor = mask_tensor.unsqueeze(0)
+            else:
+                mask_tensor = residual_mask.to(device).to(z_bg.dtype)
+                if mask_tensor.ndim == 4:
+                    mask_tensor = mask_tensor.mean(dim=1)
+            if mask_tensor.ndim == 2:
+                mask_tensor = mask_tensor.unsqueeze(0)
+            if mask_tensor.ndim == 3:
+                mask_tensor = mask_tensor.unsqueeze(1)
+            mask_tensor = torch_F.interpolate(
+                mask_tensor,
+                size=(z_bg.shape[2], z_bg.shape[3]),
+                mode="nearest",
+            )
+            mask_tensor = (mask_tensor > 0).float()
+
+            delta = (latents - z_bg) / residual_alpha
+            latents = z_bg + residual_alpha * delta * mask_tensor
+
         latents = (
             latents / self.vae.config.scaling_factor
         ) + self.vae.config.shift_factor

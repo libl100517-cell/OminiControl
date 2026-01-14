@@ -171,6 +171,8 @@ class OminiModel(L.LightningModule):
                     if f"condition_{i}" not in batch:
                         break
                     c_type = batch.get(f"condition_type_{i}")
+                    if isinstance(c_type, (list, tuple)):
+                        c_type = c_type[0] if c_type else None
                     if c_type == residual_background_type:
                         background = batch[f"condition_{i}"]
                     elif c_type == residual_mask_type:
@@ -317,6 +319,8 @@ class OminiModel(L.LightningModule):
         target = x_1 - x_0
         if residual_training and residual_mask_tokens is not None:
             mask_tokens = residual_mask_tokens
+            if mask_tokens.shape[-1] != pred.shape[-1]:
+                mask_tokens = mask_tokens.mean(dim=-1, keepdim=True)
             if mask_tokens.shape[-1] == 1 and pred.shape[-1] != 1:
                 mask_tokens = mask_tokens.expand(-1, -1, pred.shape[-1])
             pred = pred * mask_tokens

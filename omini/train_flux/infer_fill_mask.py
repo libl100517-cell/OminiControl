@@ -2,9 +2,7 @@ import argparse
 import os
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image, ImageFilter
 
 from .train_spatial_alignment import FillMaskDataset
@@ -81,18 +79,6 @@ def main():
     position_scale = dataset_config.get("position_scale", 1.0)
     residual_alpha = training_config.get("residual_alpha", 1.0)
 
-    def encode_latents(images_tensor):
-        images_tensor = pipe.image_processor.preprocess(images_tensor)
-        images_tensor = images_tensor.to(args.device).to(pipe.dtype)
-        latents = pipe.vae.encode(images_tensor).latent_dist.sample()
-        latents = (latents - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
-        return latents
-
-    def decode_latents(latents):
-        latents = latents / pipe.vae.config.scaling_factor + pipe.vae.config.shift_factor
-        decoded = pipe.vae.decode(latents).sample
-        return pipe.image_processor.postprocess(decoded, output_type="pil")
-
     def mask_path_for(relative_path: str) -> Path:
         normalized = FillMaskDataset._normalize_path(relative_path)
         parts = Path(normalized).parts
@@ -152,23 +138,12 @@ def main():
             generator=generator,
             model_config=config.get("model", {}),
             kv_cache=config.get("model", {}).get("independent_condition", False),
+            residual_background=background if args.residual_inference else None,
+            residual_mask=mask if args.residual_inference else None,
+            residual_alpha=residual_alpha,
         )
 
-        if args.residual_inference:
-            z_bg = encode_latents(background)
-            z_1 = encode_latents(result.images[0])
-            mask_tensor = torch.tensor(np.array(mask) / 255.0, device=args.device)
-            mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)
-            mask_tensor = F.interpolate(
-                mask_tensor,
-                size=(z_bg.shape[2], z_bg.shape[3]),
-                mode="nearest",
-            )
-            delta = (z_1 - z_bg) / residual_alpha
-            z_out = z_bg + residual_alpha * delta * mask_tensor
-            output_image = decode_latents(z_out)[0].resize(image.size)
-        else:
-            output_image = result.images[0].resize(image.size)
+        output_image = result.images[0].resize(image.size)
         output_image.save(output_path)
 
 

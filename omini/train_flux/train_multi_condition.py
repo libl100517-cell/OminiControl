@@ -3,9 +3,7 @@ import os
 import random
 from pathlib import Path
 
-import numpy as np
 import torchvision.transforms as T
-import torch.nn.functional as F
 
 from PIL import Image, ImageDraw
 
@@ -282,6 +280,9 @@ def test_function(model, save_path, file_name):
             generator=generator,
             model_config=model.model_config,
             kv_cache=model.model_config.get("independent_condition", False),
+            residual_background=background if residual_training and dataset_type == "fill_mask" else None,
+            residual_mask=mask if residual_training and dataset_type == "fill_mask" else None,
+            residual_alpha=residual_alpha,
         )
         file_path = os.path.join(
             save_path, f"{file_name}_{'|'.join(condition_type)}_{i}.jpg"
