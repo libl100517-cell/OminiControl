@@ -10,18 +10,20 @@ train:
   save_interval: 1000
   sample_interval: 100
   max_steps: -1
+  residual_training: false
+  residual_alpha: 1.0
+  residual_mask_type: "mask"
+  residual_background_type: "background"
   gradient_checkpointing: true # (Turn off for faster training)
   save_path: "runs"
 
-  # Specify the type of condition to use. 
-  # Options: ["canny", "coloring", "deblurring", "depth", "depth_pred", "fill"]
+  # Specify the type of condition to use.
+  # Options: ["canny", "coloring", "deblurring", "depth", "depth_pred", "mask", "background"]
   condition_type:
-    - "canny"
-    - "deblurring"
-    - "depth"
-    - "fill"
+    - "background"
+    - "mask"
   dataset:
-    type: "img"
+    type: "fill_mask" # "fill_mask" to use image/mask list files
     urls:
       # (Uncomment the following lines to use more data)
       # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000040.tar"
@@ -40,6 +42,9 @@ train:
       - 512
     drop_text_prob: 0.1
     drop_image_prob: 0.1
+    # For fill_mask datasets:
+    list_file: "/home/libaoluo/sam2/train_diffuser.txt"
+    root_dir: "/home/libaoluo/dataset/opensourse_datasets"
 
 
   wandb:

@@ -1,9 +1,13 @@
+import csv
 import lightning as L
 from diffusers.pipelines import FluxPipeline
 import torch
 import wandb
 import os
 import yaml
+import time
+from lightning.pytorch.callbacks import ModelCheckpoint
+import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model_state_dict
 from torch.utils.data import DataLoader
 import time
@@ -139,6 +143,12 @@ class OminiModel(L.LightningModule):
     def training_step(self, batch, batch_idx):
         imgs, prompts = batch["image"], batch["description"]
         image_latent_mask = batch.get("image_latent_mask", None)
+        residual_training = self.training_config.get("residual_training", False)
+        residual_alpha = self.training_config.get("residual_alpha", 1.0)
+        residual_mask_type = self.training_config.get("residual_mask_type", "mask")
+        residual_background_type = self.training_config.get(
+            "residual_background_type", "background"
+        )
 
         # Get the conditions and position deltas from the batch
         conditions, position_deltas, position_scales, latent_masks = [], [], [], []
@@ -153,7 +163,69 @@ class OminiModel(L.LightningModule):
         # Prepare inputs
         with torch.no_grad():
             # Prepare image input
-            x_0, img_ids = encode_images(self.flux_pipe, imgs)
+            residual_mask_tokens = None
+            if residual_training:
+                background = None
+                mask = None
+                for i in range(1000):
+                    if f"condition_{i}" not in batch:
+                        break
+                    c_type = batch.get(f"condition_type_{i}")
+                    if c_type == residual_background_type:
+                        background = batch[f"condition_{i}"]
+                    elif c_type == residual_mask_type:
+                        mask = batch[f"condition_{i}"]
+                if background is None or mask is None:
+                    raise ValueError(
+                        "Residual training requires background and mask conditions."
+                    )
+
+                def encode_latents(images_tensor):
+                    images_tensor = self.flux_pipe.image_processor.preprocess(
+                        images_tensor
+                    )
+                    images_tensor = images_tensor.to(self.device).to(self.dtype)
+                    latents = self.flux_pipe.vae.encode(images_tensor).latent_dist.sample()
+                    latents = (
+                        latents - self.flux_pipe.vae.config.shift_factor
+                    ) * self.flux_pipe.vae.config.scaling_factor
+                    return latents
+
+                z_bg = encode_latents(background)
+                z_tgt = encode_latents(imgs)
+
+                mask_tensor = mask.mean(dim=1, keepdim=True).to(self.device)
+                mask_tensor = F.interpolate(
+                    mask_tensor,
+                    size=(z_bg.shape[2], z_bg.shape[3]),
+                    mode="nearest",
+                )
+                mask_tensor = (mask_tensor > 0).float()
+
+                z_1 = z_bg + residual_alpha * (z_tgt - z_bg) * mask_tensor
+
+                x_0 = self.flux_pipe._pack_latents(z_1, *z_1.shape)
+                x_1 = torch.randn_like(x_0).to(self.device)
+                residual_mask_tokens = self.flux_pipe._pack_latents(
+                    mask_tensor, *mask_tensor.shape
+                )
+                img_ids = self.flux_pipe._prepare_latent_image_ids(
+                    z_bg.shape[0],
+                    z_bg.shape[2],
+                    z_bg.shape[3],
+                    self.device,
+                    self.dtype,
+                )
+                if x_0.shape[1] != img_ids.shape[0]:
+                    img_ids = self.flux_pipe._prepare_latent_image_ids(
+                        z_bg.shape[0],
+                        z_bg.shape[2] // 2,
+                        z_bg.shape[3] // 2,
+                        self.device,
+                        self.dtype,
+                    )
+            else:
+                x_0, img_ids = encode_images(self.flux_pipe, imgs)
 
             # Prepare text input
             (
@@ -173,7 +245,8 @@ class OminiModel(L.LightningModule):
 
             # Prepare t and x_t
             t = torch.sigmoid(torch.randn((imgs.shape[0],), device=self.device))
-            x_1 = torch.randn_like(x_0).to(self.device)
+            if not residual_training:
+                x_1 = torch.randn_like(x_0).to(self.device)
             t_ = t.unsqueeze(1).unsqueeze(1)
             x_t = ((1 - t_) * x_0 + t_ * x_1).to(self.dtype)
             if image_latent_mask is not None:
@@ -241,7 +314,14 @@ class OminiModel(L.LightningModule):
         pred = transformer_out[0]
 
         # Compute loss
-        step_loss = torch.nn.functional.mse_loss(pred, (x_1 - x_0), reduction="mean")
+        target = x_1 - x_0
+        if residual_training and residual_mask_tokens is not None:
+            mask_tokens = residual_mask_tokens
+            if mask_tokens.shape[-1] == 1 and pred.shape[-1] != 1:
+                mask_tokens = mask_tokens.expand(-1, -1, pred.shape[-1])
+            pred = pred * mask_tokens
+            target = target * mask_tokens
+        step_loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
         self.last_t = t.mean().item()
 
         self.log_loss = (
@@ -263,6 +343,7 @@ class TrainingCallback(L.Callback):
         self.save_interval = training_config.get("save_interval", 1000)
         self.sample_interval = training_config.get("sample_interval", 1000)
         self.save_path = training_config.get("save_path", "./output")
+        self.log_file = os.path.join(self.save_path, self.run_name, "train_log.csv")
 
         self.wandb_config = training_config.get("wandb", None)
         self.use_wandb = (
@@ -271,8 +352,70 @@ class TrainingCallback(L.Callback):
 
         self.total_steps = 0
         self.test_function = test_function
+        self._log_header_written = False
+        self._start_time = None
+        self._total_step_time = 0.0
+        self._timed_steps = 0
+        self._last_step_time = None
+
+    def _write_log_header(self):
+        if self._log_header_written:
+            return
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+        with open(self.log_file, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "epoch",
+                    "step",
+                    "batch",
+                    "loss",
+                    "gradient_size",
+                    "max_gradient_size",
+                    "elapsed_seconds",
+                    "eta_seconds",
+                ]
+            )
+        self._log_header_written = True
+
+    def _append_log_row(
+        self,
+        epoch,
+        step,
+        batch_idx,
+        loss,
+        gradient_size,
+        max_grad,
+        elapsed_seconds,
+        eta_seconds,
+    ):
+        if not self._log_header_written:
+            self._write_log_header()
+        with open(self.log_file, "a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    epoch,
+                    step,
+                    batch_idx,
+                    f"{loss:.6f}",
+                    f"{gradient_size:.6f}",
+                    f"{max_grad:.6f}",
+                    f"{elapsed_seconds:.2f}",
+                    f"{eta_seconds:.2f}",
+                ]
+            )
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        now = time.time()
+        if self._start_time is None:
+            self._start_time = now
+        if self._last_step_time is not None:
+            step_time = now - self._last_step_time
+            self._total_step_time += step_time
+            self._timed_steps += 1
+        self._last_step_time = now
+
         gradient_size = 0
         max_gradient_size = 0
         count = 0
@@ -300,9 +443,44 @@ class TrainingCallback(L.Callback):
             wandb.log(report_dict)
 
         if self.total_steps % self.print_every_n_steps == 0:
-            print(
-                f"Epoch: {trainer.current_epoch}, Steps: {self.total_steps}, Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}, Gradient size: {gradient_size:.4f}, Max gradient size: {max_gradient_size:.4f}"
+            elapsed_seconds = now - self._start_time if self._start_time else 0.0
+            avg_step_time = (
+                self._total_step_time / self._timed_steps if self._timed_steps else 0.0
             )
+            if trainer.max_steps is not None and trainer.max_steps > 0:
+                remaining_steps = max(trainer.max_steps - self.total_steps, 0)
+                eta_seconds = remaining_steps * avg_step_time
+            else:
+                eta_seconds = 0.0
+            print(
+                "Epoch: "
+                f"{trainer.current_epoch}, Steps: {self.total_steps}, "
+                f"Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}, "
+                f"Gradient size: {gradient_size:.4f}, Max gradient size: "
+                f"{max_gradient_size:.4f}, Elapsed: {elapsed_seconds:.1f}s, "
+                f"ETA: {eta_seconds:.1f}s"
+            )
+
+        elapsed_seconds = now - self._start_time if self._start_time else 0.0
+        avg_step_time = (
+            self._total_step_time / self._timed_steps if self._timed_steps else 0.0
+        )
+        if trainer.max_steps is not None and trainer.max_steps > 0:
+            remaining_steps = max(trainer.max_steps - self.total_steps, 0)
+            eta_seconds = remaining_steps * avg_step_time
+        else:
+            eta_seconds = 0.0
+
+        self._append_log_row(
+            trainer.current_epoch,
+            self.total_steps,
+            batch_idx,
+            outputs["loss"].item() * trainer.accumulate_grad_batches,
+            gradient_size,
+            max_gradient_size,
+            elapsed_seconds,
+            eta_seconds,
+        )
 
         # Save LoRA weights at specified intervals
         if self.total_steps % self.save_interval == 0:
@@ -355,14 +533,25 @@ def train(dataset, trainable_model, config, test_function):
     )
 
     # Callbacks for testing and saving checkpoints
+    callbacks = []
     if is_main_process:
-        callbacks = [TrainingCallback(run_name, training_config, test_function)]
+        callbacks.append(TrainingCallback(run_name, training_config, test_function))
+        if training_config.get("save_checkpoints", False):
+            callbacks.append(
+                ModelCheckpoint(
+                    dirpath=f"{training_config.get('save_path', './output')}/{run_name}/checkpoints",
+                    filename="step{step}",
+                    save_top_k=-1,
+                    save_last=True,
+                    every_n_train_steps=training_config.get("checkpoint_interval", 1000),
+                )
+            )
 
     # Initialize trainer
     trainer = L.Trainer(
         accumulate_grad_batches=training_config["accumulate_grad_batches"],
         callbacks=callbacks if is_main_process else [],
-        enable_checkpointing=False,
+        enable_checkpointing=training_config.get("save_checkpoints", False),
         enable_progress_bar=False,
         logger=False,
         max_steps=training_config.get("max_steps", -1),
@@ -381,4 +570,8 @@ def train(dataset, trainable_model, config, test_function):
             yaml.dump(config, f)
 
     # Start training
-    trainer.fit(trainable_model, train_loader)
+    trainer.fit(
+        trainable_model,
+        train_loader,
+        ckpt_path=training_config.get("resume_from_checkpoint", None),
+    )
