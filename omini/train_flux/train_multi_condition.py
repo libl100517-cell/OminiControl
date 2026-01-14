@@ -7,7 +7,7 @@ import torchvision.transforms as T
 
 from PIL import Image, ImageDraw
 
-from datasets import load_dataset
+# from datasets import load_dataset
 
 from .trainer import OminiModel, get_config, train
 from ..pipeline.flux_omini import Condition, convert_to_condition, generate
@@ -250,22 +250,6 @@ def test_function(model, save_path, file_name):
             condition_list.append(condition)
         test_list.append((condition_list, "A beautiful vase on a table."))
     os.makedirs(save_path, exist_ok=True)
-    def encode_latents(images_tensor):
-        images_tensor = model.flux_pipe.image_processor.preprocess(images_tensor)
-        images_tensor = images_tensor.to(model.device).to(model.dtype)
-        latents = model.flux_pipe.vae.encode(images_tensor).latent_dist.sample()
-        latents = (
-            latents - model.flux_pipe.vae.config.shift_factor
-        ) * model.flux_pipe.vae.config.scaling_factor
-        return latents
-
-    def decode_latents(latents):
-        latents = (
-            latents / model.flux_pipe.vae.config.scaling_factor
-            + model.flux_pipe.vae.config.shift_factor
-        )
-        decoded = model.flux_pipe.vae.decode(latents).sample
-        return model.flux_pipe.image_processor.postprocess(decoded, output_type="pil")
 
     for i, (condition, prompt) in enumerate(test_list):
         generator = torch.Generator(device=model.device)
@@ -287,21 +271,7 @@ def test_function(model, save_path, file_name):
         file_path = os.path.join(
             save_path, f"{file_name}_{'|'.join(condition_type)}_{i}.jpg"
         )
-        output_image = res.images[0]
-        if residual_training and dataset_type == "fill_mask":
-            z_bg = encode_latents(background)
-            z_1 = encode_latents(output_image)
-            mask_tensor = torch.tensor(np.array(mask) / 255.0, device=model.device)
-            mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)
-            mask_tensor = F.interpolate(
-                mask_tensor,
-                size=(z_bg.shape[2], z_bg.shape[3]),
-                mode="nearest",
-            )
-            delta = (z_1 - z_bg) / residual_alpha
-            z_out = z_bg + residual_alpha * delta * mask_tensor
-            output_image = decode_latents(z_out)[0]
-        output_image.save(file_path)
+        res.images[0].save(file_path)
 
 
 def main():
@@ -322,23 +292,23 @@ def main():
             drop_image_prob=dataset_config["drop_image_prob"],
             position_scale=dataset_config.get("position_scale", 1.0),
         )
-    else:
-        dataset = load_dataset(
-            "webdataset",
-            data_files={"train": dataset_config["urls"]},
-            split="train",
-            cache_dir="cache/t2i2m",
-            num_proc=32,
-        )
-        dataset = ImageMultiConditionDataset(
-            dataset,
-            condition_size=dataset_config["condition_size"],
-            target_size=dataset_config["target_size"],
-            condition_type=training_config["condition_type"],
-            drop_text_prob=dataset_config["drop_text_prob"],
-            drop_image_prob=dataset_config["drop_image_prob"],
-            position_scale=dataset_config.get("position_scale", 1.0),
-        )
+    # else:
+    #     dataset = load_dataset(
+    #         "webdataset",
+    #         data_files={"train": dataset_config["urls"]},
+    #         split="train",
+    #         cache_dir="cache/t2i2m",
+    #         num_proc=32,
+    #     )
+    #     dataset = ImageMultiConditionDataset(
+    #         dataset,
+    #         condition_size=dataset_config["condition_size"],
+    #         target_size=dataset_config["target_size"],
+    #         condition_type=training_config["condition_type"],
+    #         drop_text_prob=dataset_config["drop_text_prob"],
+    #         drop_image_prob=dataset_config["drop_image_prob"],
+    #         position_scale=dataset_config.get("position_scale", 1.0),
+    #     )
 
     cond_n = len(training_config["condition_type"])
 

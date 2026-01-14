@@ -149,6 +149,9 @@ class OminiModel(L.LightningModule):
         residual_background_type = self.training_config.get(
             "residual_background_type", "background"
         )
+        residual_non_mask_weight = self.training_config.get(
+            "residual_non_mask_weight", 0.01
+        )
 
         # Get the conditions and position deltas from the batch
         conditions, position_deltas, position_scales, latent_masks = [], [], [], []
@@ -207,10 +210,12 @@ class OminiModel(L.LightningModule):
                 z_1 = z_bg + residual_alpha * (z_tgt - z_bg) * mask_tensor
 
                 x_0 = self.flux_pipe._pack_latents(z_1, *z_1.shape)
+                x_0 = x_0.to(self.device, dtype=self.dtype)
                 x_1 = torch.randn_like(x_0).to(self.device)
-                residual_mask_tokens = self.flux_pipe._pack_latents(
-                    mask_tensor, *mask_tensor.shape
-                )
+                # residual_mask_tokens = self.flux_pipe._pack_latents(
+                #     mask_tensor, *mask_tensor.shape
+                # )
+
                 img_ids = self.flux_pipe._prepare_latent_image_ids(
                     z_bg.shape[0],
                     z_bg.shape[2],
@@ -226,6 +231,22 @@ class OminiModel(L.LightningModule):
                         self.device,
                         self.dtype,
                     )
+                
+                # mask_tensor: [B,1,H,W] in {0,1} or soft in [0,1]
+                # img_ids: [N, 3]  (通常是 [batch_id, y, x] 或 [something, y, x])
+
+                # 取出 token 的 (y,x)
+                y = img_ids[:, 1].long()
+                x = img_ids[:, 2].long()
+
+                # 注意：img_ids 可能是归一化坐标或带缩放偏置的浮点
+                # 你当前 _prepare_latent_image_ids 生成的一般是 0..H-1/0..W-1 的 float
+                y = y.clamp(0, mask_tensor.shape[2]-1)
+                x = x.clamp(0, mask_tensor.shape[3]-1)
+
+                # token gate: [B, N, 1]
+                gate = mask_tensor[:, :, y, x]            # [B,1,N]
+                gate = gate.permute(0, 2, 1).contiguous() # [B,N,1]
             else:
                 x_0, img_ids = encode_images(self.flux_pipe, imgs)
 
@@ -256,7 +277,7 @@ class OminiModel(L.LightningModule):
                 x_1 = x_1[:, image_latent_mask[0]]
                 x_t = x_t[:, image_latent_mask[0]]
                 img_ids = img_ids[image_latent_mask[0]]
-
+            
             # Prepare conditions
             condition_latents, condition_ids = [], []
             for cond, p_delta, p_scale, latent_mask in zip(
@@ -317,14 +338,20 @@ class OminiModel(L.LightningModule):
 
         # Compute loss
         target = x_1 - x_0
-        if residual_training and residual_mask_tokens is not None:
-            mask_tokens = residual_mask_tokens
-            if mask_tokens.shape[-1] != pred.shape[-1]:
-                mask_tokens = mask_tokens.mean(dim=-1, keepdim=True)
-            if mask_tokens.shape[-1] == 1 and pred.shape[-1] != 1:
-                mask_tokens = mask_tokens.expand(-1, -1, pred.shape[-1])
-            pred = pred * mask_tokens
-            target = target * mask_tokens
+        # if residual_training and residual_mask_tokens is not None:
+            # mask_tokens = residual_mask_tokens
+            # if mask_tokens.shape[-1] == 1 and pred.shape[-1] != 1:
+            #     mask_tokens = mask_tokens.expand(-1, -1, pred.shape[-1])
+            # pred = pred * mask_tokens
+            # target = target * mask_tokens
+        if residual_training:
+            assert pred.shape[0] == gate.shape[0]
+            assert pred.shape[1] == gate.shape[1], (pred.shape, gate.shape)
+            gate = gate.to(device=pred.device, dtype=pred.dtype)  # [B,N,1]
+            weights = gate + residual_non_mask_weight * (1 - gate)
+            pred = pred * weights
+            target = target * weights
+
         step_loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
         self.last_t = t.mean().item()
 

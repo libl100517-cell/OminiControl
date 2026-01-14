@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 import torch
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
 
 from .train_spatial_alignment import FillMaskDataset
 from .trainer import get_config
@@ -16,13 +16,15 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default=None,
+        # default='/home/libaoluo/sam2/OminiControl/train/config/spatial_alignment.yaml',
+        default='/home/libaoluo/sam2/OminiControl/train/config/multi_condition.yaml',
         help="Path to config file; defaults to OMINI_CONFIG env var.",
     )
     parser.add_argument(
         "--lora_path",
         type=str,
-        required=True,
+        # default='/home/libaoluo/sam2/OminiControl/runs/20260109-215023/ckpt/30000',
+        default='/home/libaoluo/sam2/OminiControl/runs/20260114-161713/ckpt/2000',
         help="Directory containing LoRA weights (e.g., default.safetensors).",
     )
     parser.add_argument(
@@ -34,7 +36,7 @@ def parse_args():
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
+        default="cuda:2",
         help="Device for inference.",
     )
     parser.add_argument(
@@ -47,6 +49,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    args.residual_inference = True
     if args.config:
         os.environ["OMINI_CONFIG"] = args.config
 
@@ -58,6 +61,7 @@ def main():
         raise ValueError("This inference script only supports fill_mask datasets.")
 
     list_file = dataset_config["list_file"]
+    list_file = "/home/libaoluo/sam2/test_flux.txt"
     root_dir = Path(dataset_config["root_dir"])
     condition_size = tuple(dataset_config["condition_size"])
     target_size = tuple(dataset_config["target_size"])
@@ -100,7 +104,10 @@ def main():
             raise ValueError(
                 f"Expected 'images' in path for output replacement: {relative_path}"
             )
-        output_parts = ["images_bg" if part == "images" else part for part in parts]
+        if args.residual_inference:
+            output_parts = ["images_crack" if part == "images" else part for part in parts]
+        else:
+            output_parts = ["images_bg" if part == "images" else part for part in parts]
         output_path = root_dir.joinpath(*output_parts)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -109,9 +116,9 @@ def main():
             *["images_bg" if part == "images" else part for part in parts]
         )
 
-        image = Image.open(image_path).convert("RGB")
-        background = Image.open(background_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L")
+        image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
+        background = ImageOps.exif_transpose(Image.open(background_path)).convert("RGB")
+        mask = ImageOps.exif_transpose(Image.open(mask_path)).convert("L")
         if mask.size != image.size:
             mask = mask.resize(image.size, Image.NEAREST)
         if background.size != image.size:
