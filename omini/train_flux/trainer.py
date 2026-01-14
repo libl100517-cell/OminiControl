@@ -7,6 +7,7 @@ import os
 import yaml
 import time
 from lightning.pytorch.callbacks import ModelCheckpoint
+import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model_state_dict
 from torch.utils.data import DataLoader
 import time
@@ -142,6 +143,12 @@ class OminiModel(L.LightningModule):
     def training_step(self, batch, batch_idx):
         imgs, prompts = batch["image"], batch["description"]
         image_latent_mask = batch.get("image_latent_mask", None)
+        residual_training = self.training_config.get("residual_training", False)
+        residual_alpha = self.training_config.get("residual_alpha", 1.0)
+        residual_mask_type = self.training_config.get("residual_mask_type", "mask")
+        residual_background_type = self.training_config.get(
+            "residual_background_type", "background"
+        )
 
         # Get the conditions and position deltas from the batch
         conditions, position_deltas, position_scales, latent_masks = [], [], [], []
@@ -156,7 +163,69 @@ class OminiModel(L.LightningModule):
         # Prepare inputs
         with torch.no_grad():
             # Prepare image input
-            x_0, img_ids = encode_images(self.flux_pipe, imgs)
+            residual_mask_tokens = None
+            if residual_training:
+                background = None
+                mask = None
+                for i in range(1000):
+                    if f"condition_{i}" not in batch:
+                        break
+                    c_type = batch.get(f"condition_type_{i}")
+                    if c_type == residual_background_type:
+                        background = batch[f"condition_{i}"]
+                    elif c_type == residual_mask_type:
+                        mask = batch[f"condition_{i}"]
+                if background is None or mask is None:
+                    raise ValueError(
+                        "Residual training requires background and mask conditions."
+                    )
+
+                def encode_latents(images_tensor):
+                    images_tensor = self.flux_pipe.image_processor.preprocess(
+                        images_tensor
+                    )
+                    images_tensor = images_tensor.to(self.device).to(self.dtype)
+                    latents = self.flux_pipe.vae.encode(images_tensor).latent_dist.sample()
+                    latents = (
+                        latents - self.flux_pipe.vae.config.shift_factor
+                    ) * self.flux_pipe.vae.config.scaling_factor
+                    return latents
+
+                z_bg = encode_latents(background)
+                z_tgt = encode_latents(imgs)
+
+                mask_tensor = mask.mean(dim=1, keepdim=True).to(self.device)
+                mask_tensor = F.interpolate(
+                    mask_tensor,
+                    size=(z_bg.shape[2], z_bg.shape[3]),
+                    mode="nearest",
+                )
+                mask_tensor = (mask_tensor > 0).float()
+
+                z_1 = z_bg + residual_alpha * (z_tgt - z_bg) * mask_tensor
+
+                x_0 = self.flux_pipe._pack_latents(z_1, *z_1.shape)
+                x_1 = torch.randn_like(x_0).to(self.device)
+                residual_mask_tokens = self.flux_pipe._pack_latents(
+                    mask_tensor, *mask_tensor.shape
+                )
+                img_ids = self.flux_pipe._prepare_latent_image_ids(
+                    z_bg.shape[0],
+                    z_bg.shape[2],
+                    z_bg.shape[3],
+                    self.device,
+                    self.dtype,
+                )
+                if x_0.shape[1] != img_ids.shape[0]:
+                    img_ids = self.flux_pipe._prepare_latent_image_ids(
+                        z_bg.shape[0],
+                        z_bg.shape[2] // 2,
+                        z_bg.shape[3] // 2,
+                        self.device,
+                        self.dtype,
+                    )
+            else:
+                x_0, img_ids = encode_images(self.flux_pipe, imgs)
 
             # Prepare text input
             (
@@ -176,7 +245,8 @@ class OminiModel(L.LightningModule):
 
             # Prepare t and x_t
             t = torch.sigmoid(torch.randn((imgs.shape[0],), device=self.device))
-            x_1 = torch.randn_like(x_0).to(self.device)
+            if not residual_training:
+                x_1 = torch.randn_like(x_0).to(self.device)
             t_ = t.unsqueeze(1).unsqueeze(1)
             x_t = ((1 - t_) * x_0 + t_ * x_1).to(self.dtype)
             if image_latent_mask is not None:
@@ -244,7 +314,14 @@ class OminiModel(L.LightningModule):
         pred = transformer_out[0]
 
         # Compute loss
-        step_loss = torch.nn.functional.mse_loss(pred, (x_1 - x_0), reduction="mean")
+        target = x_1 - x_0
+        if residual_training and residual_mask_tokens is not None:
+            mask_tokens = residual_mask_tokens
+            if mask_tokens.shape[-1] == 1 and pred.shape[-1] != 1:
+                mask_tokens = mask_tokens.expand(-1, -1, pred.shape[-1])
+            pred = pred * mask_tokens
+            target = target * mask_tokens
+        step_loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
         self.last_t = t.mean().item()
 
         self.log_loss = (

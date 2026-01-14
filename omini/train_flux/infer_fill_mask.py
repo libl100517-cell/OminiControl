@@ -2,7 +2,9 @@ import argparse
 import os
 from pathlib import Path
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image, ImageFilter
 
 from .train_spatial_alignment import FillMaskDataset
@@ -36,6 +38,11 @@ def parse_args():
         type=str,
         default="cuda",
         help="Device for inference.",
+    )
+    parser.add_argument(
+        "--residual_inference",
+        action="store_true",
+        help="Use residual inference (blend generated residual with background).",
     )
     return parser.parse_args()
 
@@ -72,6 +79,19 @@ def main():
     adapter = args.adapter_name
     position_delta = dataset_config.get("position_delta", [0, 0])
     position_scale = dataset_config.get("position_scale", 1.0)
+    residual_alpha = training_config.get("residual_alpha", 1.0)
+
+    def encode_latents(images_tensor):
+        images_tensor = pipe.image_processor.preprocess(images_tensor)
+        images_tensor = images_tensor.to(args.device).to(pipe.dtype)
+        latents = pipe.vae.encode(images_tensor).latent_dist.sample()
+        latents = (latents - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+        return latents
+
+    def decode_latents(latents):
+        latents = latents / pipe.vae.config.scaling_factor + pipe.vae.config.shift_factor
+        decoded = pipe.vae.decode(latents).sample
+        return pipe.image_processor.postprocess(decoded, output_type="pil")
 
     def mask_path_for(relative_path: str) -> Path:
         normalized = FillMaskDataset._normalize_path(relative_path)
@@ -99,11 +119,17 @@ def main():
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         mask_path = mask_path_for(relative_path)
+        background_path = root_dir.joinpath(
+            *["images_bg" if part == "images" else part for part in parts]
+        )
 
         image = Image.open(image_path).convert("RGB")
+        background = Image.open(background_path).convert("RGB")
         mask = Image.open(mask_path).convert("L")
         if mask.size != image.size:
             mask = mask.resize(image.size, Image.NEAREST)
+        if background.size != image.size:
+            background = background.resize(image.size, Image.BICUBIC)
         mask = mask.point(lambda v: 255 if v > 0 else 0)
         mask = mask.filter(ImageFilter.MaxFilter(5))
 
@@ -128,7 +154,21 @@ def main():
             kv_cache=config.get("model", {}).get("independent_condition", False),
         )
 
-        output_image = result.images[0].resize(image.size)
+        if args.residual_inference:
+            z_bg = encode_latents(background)
+            z_1 = encode_latents(result.images[0])
+            mask_tensor = torch.tensor(np.array(mask) / 255.0, device=args.device)
+            mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)
+            mask_tensor = F.interpolate(
+                mask_tensor,
+                size=(z_bg.shape[2], z_bg.shape[3]),
+                mode="nearest",
+            )
+            delta = (z_1 - z_bg) / residual_alpha
+            z_out = z_bg + residual_alpha * delta * mask_tensor
+            output_image = decode_latents(z_out)[0].resize(image.size)
+        else:
+            output_image = result.images[0].resize(image.size)
         output_image.save(output_path)
 
 

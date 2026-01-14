@@ -10,6 +10,10 @@ train:
   save_interval: 1000
   sample_interval: 100
   max_steps: -1
+  residual_training: false
+  residual_alpha: 1.0
+  residual_mask_type: "mask"
+  residual_background_type: "background"
   gradient_checkpointing: true # (Turn off for faster training)
   save_path: "runs"
 
