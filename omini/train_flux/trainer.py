@@ -200,53 +200,69 @@ class OminiModel(L.LightningModule):
                 z_tgt = encode_latents(imgs)
 
                 mask_tensor = mask.mean(dim=1, keepdim=True).to(self.device)
-                mask_tensor = F.interpolate(
-                    mask_tensor,
-                    size=(z_bg.shape[2], z_bg.shape[3]),
-                    mode="nearest",
-                )
-                mask_tensor = (mask_tensor > 0).float()
 
-                z_1 = z_bg + residual_alpha * (z_tgt - z_bg) * mask_tensor
+                # mask_tensor: [B,1,H_lat,W_lat]  in {0,1} or [0,1]
+                mask_lat = F.interpolate(mask_tensor, size=(z_bg.shape[2], z_bg.shape[3]), mode="nearest")
 
-                x_0 = self.flux_pipe._pack_latents(z_1, *z_1.shape)
-                x_0 = x_0.to(self.device, dtype=self.dtype)
-                x_1 = torch.randn_like(x_0).to(self.device)
-                # residual_mask_tokens = self.flux_pipe._pack_latents(
-                #     mask_tensor, *mask_tensor.shape
+                # 关键：把 mask_lat 走同一个 pack，保证 token 对齐
+                mask_tokens = self.flux_pipe._pack_latents(mask_lat, *mask_lat.shape)  # [B, N, 1] 或 [B,N,D] 取决于实现
+
+                # 统一成 [B, N, 1]
+                if mask_tokens.ndim == 3 and mask_tokens.shape[-1] != 1:
+                    # 有的实现会把 C=1 也映射成 D=1；如果不是，就取一个通道/均值
+                    gate = mask_tokens.mean(dim=-1, keepdim=True)
+                else:
+                    gate = mask_tokens  # [B,N,1]
+                
+                # mask_tensor = F.interpolate(
+                #     mask_tensor,
+                #     size=(z_bg.shape[2], z_bg.shape[3]),
+                #     mode="nearest",
                 # )
+                # mask_tensor = (mask_tensor > 0).float()
 
-                img_ids = self.flux_pipe._prepare_latent_image_ids(
-                    z_bg.shape[0],
-                    z_bg.shape[2],
-                    z_bg.shape[3],
-                    self.device,
-                    self.dtype,
-                )
-                if x_0.shape[1] != img_ids.shape[0]:
-                    img_ids = self.flux_pipe._prepare_latent_image_ids(
-                        z_bg.shape[0],
-                        z_bg.shape[2] // 2,
-                        z_bg.shape[3] // 2,
-                        self.device,
-                        self.dtype,
-                    )
+                x_0, img_ids = encode_images(self.flux_pipe, imgs)
+
+                # z_1 = z_bg + residual_alpha * (z_tgt - z_bg) * mask_tensor
+
+                # x_0 = self.flux_pipe._pack_latents(z_1, *z_1.shape)
+                # x_0 = x_0.to(self.device, dtype=self.dtype)
+                # x_1 = torch.randn_like(x_0).to(self.device)
+                # # residual_mask_tokens = self.flux_pipe._pack_latents(
+                # #     mask_tensor, *mask_tensor.shape
+                # # )
+
+                # img_ids = self.flux_pipe._prepare_latent_image_ids(
+                #     z_bg.shape[0],
+                #     z_bg.shape[2],
+                #     z_bg.shape[3],
+                #     self.device,
+                #     self.dtype,
+                # )
+                # if x_0.shape[1] != img_ids.shape[0]:
+                #     img_ids = self.flux_pipe._prepare_latent_image_ids(
+                #         z_bg.shape[0],
+                #         z_bg.shape[2] // 2,
+                #         z_bg.shape[3] // 2,
+                #         self.device,
+                #         self.dtype,
+                #     )
                 
                 # mask_tensor: [B,1,H,W] in {0,1} or soft in [0,1]
                 # img_ids: [N, 3]  (通常是 [batch_id, y, x] 或 [something, y, x])
 
-                # 取出 token 的 (y,x)
-                y = img_ids[:, 1].long()
-                x = img_ids[:, 2].long()
+                # # 取出 token 的 (y,x)
+                # y = img_ids[:, 1].long()
+                # x = img_ids[:, 2].long()
 
-                # 注意：img_ids 可能是归一化坐标或带缩放偏置的浮点
-                # 你当前 _prepare_latent_image_ids 生成的一般是 0..H-1/0..W-1 的 float
-                y = y.clamp(0, mask_tensor.shape[2]-1)
-                x = x.clamp(0, mask_tensor.shape[3]-1)
+                # # 注意：img_ids 可能是归一化坐标或带缩放偏置的浮点
+                # # 你当前 _prepare_latent_image_ids 生成的一般是 0..H-1/0..W-1 的 float
+                # y = y.clamp(0, mask_tensor.shape[2]-1)
+                # x = x.clamp(0, mask_tensor.shape[3]-1)
 
-                # token gate: [B, N, 1]
-                gate = mask_tensor[:, :, y, x]            # [B,1,N]
-                gate = gate.permute(0, 2, 1).contiguous() # [B,N,1]
+                # # token gate: [B, N, 1]
+                # gate = mask_tensor[:, :, y, x]            # [B,1,N]
+                # gate = gate.permute(0, 2, 1).contiguous() # [B,N,1]
             else:
                 x_0, img_ids = encode_images(self.flux_pipe, imgs)
 
@@ -268,8 +284,7 @@ class OminiModel(L.LightningModule):
 
             # Prepare t and x_t
             t = torch.sigmoid(torch.randn((imgs.shape[0],), device=self.device))
-            if not residual_training:
-                x_1 = torch.randn_like(x_0).to(self.device)
+            x_1 = torch.randn_like(x_0).to(self.device)
             t_ = t.unsqueeze(1).unsqueeze(1)
             x_t = ((1 - t_) * x_0 + t_ * x_1).to(self.dtype)
             if image_latent_mask is not None:
@@ -277,6 +292,7 @@ class OminiModel(L.LightningModule):
                 x_1 = x_1[:, image_latent_mask[0]]
                 x_t = x_t[:, image_latent_mask[0]]
                 img_ids = img_ids[image_latent_mask[0]]
+                gate = gate[:, image_latent_mask[0]]
             
             # Prepare conditions
             condition_latents, condition_ids = [], []
@@ -338,21 +354,38 @@ class OminiModel(L.LightningModule):
 
         # Compute loss
         target = x_1 - x_0
-        # if residual_training and residual_mask_tokens is not None:
-            # mask_tokens = residual_mask_tokens
-            # if mask_tokens.shape[-1] == 1 and pred.shape[-1] != 1:
-            #     mask_tokens = mask_tokens.expand(-1, -1, pred.shape[-1])
-            # pred = pred * mask_tokens
-            # target = target * mask_tokens
-        if residual_training:
-            assert pred.shape[0] == gate.shape[0]
-            assert pred.shape[1] == gate.shape[1], (pred.shape, gate.shape)
-            gate = gate.to(device=pred.device, dtype=pred.dtype)  # [B,N,1]
-            weights = gate + residual_non_mask_weight * (1 - gate)
-            pred = pred * weights
-            target = target * weights
 
-        step_loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
+        if residual_training:
+            
+            # weights = gate + residual_non_mask_weight * (1 - gate)   # [B,N,1]
+
+            err2 = (pred - target).pow(2)          # [B, N, D]
+            gate = gate.to(device=pred.device, dtype=pred.dtype)     # [B,N,1]
+            gate = gate.clamp(0, 1)
+            gate = gate.expand(-1, -1, err2.shape[-1])
+
+            eps = 1e-8
+            mask_mean    = (err2 * gate).sum() / (gate.sum() + eps)
+            nonmask_mean = (err2 * (1 - gate)).sum() / ((1 - gate).sum() + eps)
+
+            # 两边占比：你说的“总数/各自数” => 本质上就是 0.5 / 0.5
+            alpha = 0.9
+            step_loss = alpha * mask_mean + (1 - alpha) * nonmask_mean
+            self.mask_loss = (
+                mask_mean.item()
+                if not hasattr(self, "mask_loss")
+                else self.mask_loss * 0.95 + mask_mean.item() * 0.05
+            )
+            self.nonmask_loss = (
+                nonmask_mean.item()
+                if not hasattr(self, "nonmask_loss")
+                else self.nonmask_loss * 0.95 + nonmask_mean.item() * 0.05
+            )
+        else:
+            weights = torch.ones((pred.shape[0], pred.shape[1], 1), device=pred.device, dtype=pred.dtype)
+            step_loss = ((pred - target).pow(2) * weights).mean()
+
+        # step_loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
         self.last_t = t.mean().item()
 
         self.log_loss = (
@@ -487,6 +520,7 @@ class TrainingCallback(L.Callback):
                 "Epoch: "
                 f"{trainer.current_epoch}, Steps: {self.total_steps}, "
                 f"Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}, "
+                f"MaskLoss: {pl_module.mask_loss:.4f}, NonmaskLoss: {pl_module.nonmask_loss:.4f}, "
                 f"Gradient size: {gradient_size:.4f}, Max gradient size: "
                 f"{max_gradient_size:.4f}, Elapsed: {elapsed_seconds:.1f}s, "
                 f"ETA: {eta_seconds:.1f}s"

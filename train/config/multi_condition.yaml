@@ -1,19 +1,21 @@
-flux_path: "black-forest-labs/FLUX.1-dev"
+flux_path: "/home/libaoluo/sam2/OminiControl/flux"
 dtype: "bfloat16"
 
 model:
   independent_condition: false
 
 train:
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 2
+  batch_size: 4
   dataloader_workers: 5
-  save_interval: 1000
-  sample_interval: 100
+  save_interval: 10
+  sample_interval: 10
   max_steps: -1
-  residual_training: false
+  residual_training: true
   residual_alpha: 1.0
   residual_mask_type: "mask"
   residual_background_type: "background"
+  residual_non_mask_weight: 0.01
   gradient_checkpointing: true # (Turn off for faster training)
   save_path: "runs"
 
@@ -31,8 +33,8 @@ train:
       # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000042.tar"
       # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000043.tar"
       # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000044.tar"
-      - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000045.tar"
-      - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000046.tar"
+      # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000045.tar"
+      # - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_000046.tar"
     cache_name: "data_512_2M"
     condition_size: 
       - 512
@@ -43,7 +45,8 @@ train:
     drop_text_prob: 0.1
     drop_image_prob: 0.1
     # For fill_mask datasets:
-    list_file: "/home/libaoluo/sam2/train_diffuser.txt"
+    # list_file: "/home/libaoluo/sam2/test_flux_part.txt"
+    list_file: "/home/libaoluo/dataset/dataset_txt/CDLN1k.txt"
     root_dir: "/home/libaoluo/dataset/opensourse_datasets"
 
 
@@ -51,8 +54,8 @@ train:
     project: "OminiControl"
 
   lora_config:
-    r: 4
-    lora_alpha: 4
+    r: 32
+    lora_alpha: 32
     init_lora_weights: "gaussian"
     target_modules: "(.*x_embedder|.*(?<!single_)transformer_blocks\\.[0-9]+\\.norm1\\.linear|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_k|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_q|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_v|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_out\\.0|.*(?<!single_)transformer_blocks\\.[0-9]+\\.ff\\.net\\.2|.*single_transformer_blocks\\.[0-9]+\\.norm\\.linear|.*single_transformer_blocks\\.[0-9]+\\.proj_mlp|.*single_transformer_blocks\\.[0-9]+\\.proj_out|.*single_transformer_blocks\\.[0-9]+\\.attn.to_k|.*single_transformer_blocks\\.[0-9]+\\.attn.to_q|.*single_transformer_blocks\\.[0-9]+\\.attn.to_v|.*single_transformer_blocks\\.[0-9]+\\.attn.to_out)"
     # (Uncomment the following lines to train less parameters while keeping the similar performance)
@@ -69,5 +72,6 @@ train:
   # (To use AdamW Optimizer, uncomment the following lines)
   # optimizer:
   #   type: AdamW
-  #   lr: 1e-4
-  #   weight_decay: 0.001
+  #   params:
+  #     lr: 0.0001
+  #     weight_decay: 0.001

@@ -2,6 +2,7 @@ import torch
 import os
 import random
 from pathlib import Path
+import numpy as np
 
 import torchvision.transforms as T
 
@@ -13,6 +14,147 @@ from .trainer import OminiModel, get_config, train
 from ..pipeline.flux_omini import Condition, convert_to_condition, generate
 from .train_spatial_alignment import FillMaskDataset, ImageConditionDataset
 
+
+# ---------------------------
+# Dataset -> (scene, material, viewpoint)
+# viewpoint: ground_closeup / uav_aerial / unknown
+# scene: road / bridge / building / tunnel / dam / tile / industrial / infrastructure / mixed / none
+# material: asphalt / concrete / steel / stone / masonry / ceramic / mixed / unknown
+# ---------------------------
+
+UAV_DATASETS = {"UAV102", "UAV315", "UAV5k", "UAV75"}
+
+# 你的表格 + 我帮你归一后的映射（可继续补充）
+DATASET_META = {
+    # Asphalt road
+    "Asphalt3k":         ("road", "asphalt", "vehicle_inspection", "ccd_camera"),
+    "AsphaltCrack300":   ("road", "asphalt", "ground_closeup", "handheld_camera"),
+    "BeijingHighway465": ("road", "asphalt", "vehicle_inspection", "vehicle_camera"),
+    "CFD118":            ("road", "asphalt", "ground_closeup", "mobile_phone"),
+    "CRACK500":          ("road", "asphalt", "ground_closeup", "mobile_phone"),
+    "CrackLS315":        ("road", "asphalt", "line_scan_active_light", "line_scan_camera"),
+    "CrackMap120":       ("road", "asphalt", "vehicle_inspection", "area_scan_camera"),
+    "CrackSC197":        ("road", "asphalt", "ground_closeup", "mobile_phone"),
+    "CrackSeg3k":        ("road", "asphalt", "vehicle_inspection", "vehicle_camera"),
+    "CrackTree260":      ("road", "asphalt", "visible_light", "area_scan_camera"),
+    "CrackTree206":      ("road", "asphalt", "visible_light", "area_scan_camera"),
+    "CRKWH100":          ("road", "asphalt", "visible_light", "line_scan_camera"),
+    "EdmCrack600":       ("road", "asphalt", "vehicle_inspection", "area_scan_camera"),
+    "GAPS384":           ("road", "asphalt", "vehicle_inspection", "vehicle_camera"),
+    "ShadowCrack210":    ("road", "asphalt", "ground_closeup", "mobile_phone"),
+    "SUT130":            ("road", "asphalt", "vehicle_inspection", "vehicle_camera"),
+    "AigleRN":           ("road", "asphalt", "ground_closeup", "handheld_camera"),
+    "ESAR":              ("road", "asphalt", "ground_closeup", "handheld_camera"),
+    "LCMS":              ("road", "asphalt", "ground_closeup", "handheld_camera"),
+    "AEL58":             ("road", "asphalt", "vehicle_inspection", "vehicle_camera"),
+    "GaMM37":            ("road", "asphalt", "vehicle_inspection", "vehicle_camera"),
+    "Sylvie":            ("road", "asphalt", "ground_closeup", "handheld_camera"),
+
+    # Concrete road
+    "CCSS670":           ("road", "concrete", "ground_closeup", "ccd_camera"),
+    "CDLN1k":            ("road", "concrete", "unknown_source", "handheld_camera"),
+    "NHA12D80":          ("road", "concrete", "vehicle_inspection", "ccd_camera"),
+    "Road420":           ("road", "concrete", "ground_closeup", "mobile_phone"),
+    "LSCD143":           ("road", "mixed", "ground_closeup", "mobile_phone"),
+
+    # Bridge
+    "BCL11k":            ("bridge", "unknown", "ground_closeup", "handheld_camera"),  # material by filename prefix
+    "CSB1k":             ("bridge", "steel", "unknown_source", "handheld_camera"),
+    "S2DS743":           ("bridge", "concrete", "uav_aerial", "uav_camera"),
+    "LCW4k":             ("bridge", "mixed", "mixed_source", "internet_image"),
+    "NCCD5k":            ("infrastructure", "concrete", "ground_closeup", "handheld_camera"),
+
+    # Building / concrete
+    "BuildCrack358":     ("building", "concrete", "uav_aerial", "uav_camera"),
+    "Facade390":         ("building", "concrete", "uav_aerial", "uav_camera"),
+    "FCNCrack776":       ("building", "concrete", "mixed_source", "internet_image"),
+    "Concrete3k":        ("building", "concrete", "ground_closeup", "handheld_camera"),
+    "Concrete600":       ("building", "concrete", "ground_closeup", "handheld_camera"),
+    "KaggleConcrete458": ("building", "concrete", "ground_closeup", "handheld_camera"),
+
+    # Tunnel / concrete
+    "CrackTAV484":       ("tunnel", "concrete", "unknown_source", "handheld_camera"),
+    "KICT200":           ("tunnel", "concrete", "vehicle_inspection", "ccd_camera"),
+    "Tunnel200":         ("tunnel", "concrete", "ground_closeup", "mobile_phone"),
+    "TunnelCrack919":    ("tunnel", "concrete", "ground_closeup", "ccd_camera"),
+
+    # Dam / concrete
+    "DSI2k":             ("dam", "concrete", "ground_closeup", "industrial_camera"),
+
+    # Stone / masonry / ceramic
+    "DIC530":            ("building", "masonry", "ground_closeup", "dic_camera"),
+    "Masonry240":        ("building", "masonry", "mixed_source", "mobile_phone"),
+    "MCS246":            ("building", "stone", "ground_closeup", "mobile_phone"),
+    "Stone331":          ("road", "stone", "visible_light", "area_scan_camera"),
+    "Ceramic100":        ("tile", "ceramic", "unknown_source", "handheld_camera"),
+    "TopoDS7k":          ("building", "mixed", "unknown_source", "handheld_camera"),
+    "CrSpEE2k":          ("building", "mixed", "ground_closeup", "handheld_camera"),
+    "CSSC186":           ("building", "mixed", "unknown_source", "internet_image"),
+    "StructureCrack690": ("building", "mixed", "mixed_source", "internet_image"),
+
+    # Mixed / infrastructure
+    "CrackNJ156":        ("road", "mixed", "ground_closeup", "ccd_camera"),
+    "DeepCrack537":      ("infrastructure", "mixed", "unknown_source", "internet_image"),
+    "Kaggle800":         ("infrastructure", "mixed", "ground_closeup", "handheld_camera"),
+    "TUT1k":             ("mixed", "mixed", "mixed_source", "mobile_phone"),
+    "SCCD7k":            ("mixed", "unknown", "mixed_source", "internet_image"),
+    "CrackVision12K":    ("mixed", "unknown", "unknown_source", "handheld_camera"),
+    "CrackSeg9k":        ("mixed", "unknown", "unknown_source", "handheld_camera"),
+    "OmniCrack30k":      ("mixed", "unknown", "unknown_source", "handheld_camera"),
+    "UDTIRICrack2k":     ("mixed", "unknown", "unknown_source", "handheld_camera"),
+    "Khanh11k":          ("mixed", "unknown", "unknown_source", "handheld_camera"),
+    "Conglomerate11k":   ("mixed", "unknown", "unknown_source", "handheld_camera"),
+    "CCrack3k":          ("mixed", "unknown", "unknown_source", "handheld_camera"),
+    "SteeCrack4k":       ("mixed", "unknown", "ground_closeup", "handheld_camera"),
+    "SteelCrack50":      ("mixed", "unknown", "ground_closeup", "handheld_camera"),
+
+    # UAV
+    "UAV102":            ("road", "asphalt", "uav_aerial", "uav_camera"),
+    "UAV5k":             ("road", "asphalt", "uav_aerial", "uav_camera"),
+    "UAV315":            ("dam", "concrete", "uav_aerial", "uav_camera"),
+    "UAV75":             ("bridge", "concrete", "uav_aerial", "uav_camera"),
+}
+
+def _normalize_path(p: str) -> str:
+    # 兼容 Windows 反斜杠
+    return p.replace("\\", "/").lstrip("/")
+
+def build_prompt(relative_path: str) -> str:
+    """
+    Example:
+      Asphalt3k\\images\\crack_237.jpg
+      BCL11k\\images\\c_000123.jpg
+      BCL11k\\images\\s_000123.jpg
+    """
+    rp = _normalize_path(relative_path)
+    parts = rp.split("/")
+    dataset = parts[0] if parts else "Unknown"
+    fname = Path(parts[-1]).name if parts else ""
+
+    scene, material, mode, device = DATASET_META.get(dataset, ("mixed", "unknown", "unknown_source", "handheld_camera"))
+
+    # UAV override
+    if dataset in UAV_DATASETS:
+        mode = "uav_aerial"
+        device = "uav_camera"
+
+    # BCL11k: filename prefix decides material
+    if dataset == "BCL11k":
+        c0 = (fname[:1] or "").lower()
+        if c0 == "c":
+            material = "concrete"
+        elif c0 == "s":
+            material = "steel"
+        else:
+            material = "unknown"
+
+    # 你说“别太长”，所以只加最关键的 domain token：dataset + mode + device
+    dataset_tag = f"[DATASET={dataset}]"
+
+    if scene == "none":
+        return f"{dataset_tag} {mode} {device} intact no_crack"
+
+    return f"{dataset_tag} {mode} {device} {scene} {material} crack_texture"
 
 class ImageMultiConditionDataset(ImageConditionDataset):
     def __getitem__(self, idx):
@@ -129,7 +271,8 @@ class FillMaskMultiConditionDataset(torch.utils.data.Dataset):
 
         drop_text = random.random() < self.drop_text_prob
         drop_image = random.random() < self.drop_image_prob
-        description = "" if drop_text else ""
+        # description = "" if drop_text else ""
+        description = build_prompt(relative_path) if not drop_text else ""
 
         condition_imgs = []
         for c_type in self.condition_type:
@@ -155,7 +298,7 @@ class FillMaskMultiConditionDataset(torch.utils.data.Dataset):
         for i, c_type in enumerate(self.condition_type):
             return_dict[f"condition_{i}"] = self.to_tensor(condition_imgs[i])
             return_dict[f"condition_type_{i}"] = c_type
-            return_dict[f"position_delta_{i}"] = [[0, 0]]
+            return_dict[f"position_delta_{i}"] = np.array([0, 0])
             return_dict[f"position_scale_{i}"] = self.position_scale
 
         return return_dict
@@ -219,7 +362,8 @@ def test_function(model, save_path, file_name):
                 position_scale,
             )
             condition_list.append(condition)
-        test_list.append((condition_list, ""))
+        description = build_prompt(relative_path)
+        test_list.append((condition_list, description))
     else:
         for i, c_type in enumerate(condition_type):
             if c_type in ["canny", "coloring", "deblurring", "depth"]:
@@ -268,10 +412,11 @@ def test_function(model, save_path, file_name):
             residual_mask=mask if residual_training and dataset_type == "fill_mask" else None,
             residual_alpha=residual_alpha,
         )
+        res = res.images[0].resize(image.size)
         file_path = os.path.join(
             save_path, f"{file_name}_{'|'.join(condition_type)}_{i}.jpg"
         )
-        res.images[0].save(file_path)
+        res.save(file_path)
 
 
 def main():

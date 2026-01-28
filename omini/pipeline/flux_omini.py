@@ -762,11 +762,12 @@ def generate(
             mask_tensor = (mask_tensor > 0).float()
 
             delta = (latents - z_bg) / residual_alpha
-            latents = z_bg + residual_alpha * delta * mask_tensor
+            #latents = z_bg + residual_alpha * delta * mask_tensor
 
         latents = (
             latents / self.vae.config.scaling_factor
         ) + self.vae.config.shift_factor
+        latents = latents.to(self.vae.dtype)
         image = self.vae.decode(latents, return_dict=False)[0]
         image = self.image_processor.postprocess(image, output_type=output_type)
 
