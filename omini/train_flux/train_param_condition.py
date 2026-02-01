@@ -17,16 +17,15 @@ def _normalize_path(p: str) -> str:
     return p.replace("\\", "/").lstrip("/")
 
 
-def _parse_list_line(line: str) -> tuple[str, str, str]:
+def _parse_list_line(line: str) -> tuple[str, str]:
     parts = [part.strip() for part in line.split("\t") if part.strip()]
     if len(parts) == 1:
         parts = [part.strip() for part in line.split(",") if part.strip()]
-    if len(parts) < 2:
-        raise ValueError("Each list entry must include image_path and mask_path.")
+    if len(parts) < 1:
+        raise ValueError("Each list entry must include image_path.")
     image_path = parts[0]
-    mask_path = parts[1]
-    background_path = parts[2] if len(parts) > 2 else ""
-    return image_path, mask_path, background_path
+    background_path = parts[1] if len(parts) > 1 else ""
+    return image_path, background_path
 
 
 def _resolve_background_path(root_dir: Path, image_path: str, background_path: str) -> Path:
@@ -38,6 +37,15 @@ def _resolve_background_path(root_dir: Path, image_path: str, background_path: s
         raise ValueError(f"Expected 'images' in path for background replacement: {image_path}")
     replaced = ["images_bg" if part == "images" else part for part in parts]
     return root_dir.joinpath(*replaced)
+
+
+def _resolve_mask_path(root_dir: Path, image_path: str) -> Path:
+    normalized = _normalize_path(image_path)
+    parts = Path(normalized).parts
+    if "images" not in parts:
+        raise ValueError(f"Expected 'images' in path for mask replacement: {image_path}")
+    replaced = ["masks" if part == "images" else part for part in parts]
+    return root_dir.joinpath(*replaced).with_suffix(".png")
 
 
 def _build_param_vector(
@@ -168,7 +176,7 @@ class ParamConditionDataset(torch.utils.data.Dataset):
         self.prompt = prompt
         self.to_tensor = T.ToTensor()
 
-    def _load_entries(self, list_file: str) -> list[tuple[str, str, str]]:
+    def _load_entries(self, list_file: str) -> list[tuple[str, str]]:
         with open(list_file, "r", encoding="utf-8") as handle:
             entries = []
             for line in handle:
@@ -182,9 +190,9 @@ class ParamConditionDataset(torch.utils.data.Dataset):
         return len(self.entries)
 
     def __getitem__(self, idx):
-        image_rel, mask_rel, background_rel = self.entries[idx]
+        image_rel, background_rel = self.entries[idx]
         image_path = self.root_dir / _normalize_path(image_rel)
-        mask_path = self.root_dir / _normalize_path(mask_rel)
+        mask_path = _resolve_mask_path(self.root_dir, image_rel)
         background_path = _resolve_background_path(self.root_dir, image_rel, background_rel)
 
         image = Image.open(image_path).convert("RGB")
@@ -251,9 +259,9 @@ def test_function(model, save_path, file_name):
     if not first_line:
         raise ValueError("param_condition list_file is empty.")
 
-    image_rel, mask_rel, background_rel = _parse_list_line(first_line)
+    image_rel, background_rel = _parse_list_line(first_line)
     image_path = root_dir / _normalize_path(image_rel)
-    mask_path = root_dir / _normalize_path(mask_rel)
+    mask_path = _resolve_mask_path(root_dir, image_rel)
     background_path = _resolve_background_path(root_dir, image_rel, background_rel)
     image = Image.open(image_path).convert("RGB")
     background = Image.open(background_path).convert("RGB")
