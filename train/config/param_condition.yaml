@@ -1,0 +1,68 @@
+flux_path: "/home/libaoluo/sam2/OminiControl/flux"
+dtype: "bfloat16"
+
+model:
+  independent_condition: false
+  param_condition:
+    enabled: true
+    vector_dim: 7
+    hidden_dim: 128
+    # embed_dim: 4096  # optional override
+
+train:
+  accumulate_grad_batches: 2
+  batch_size: 4
+  dataloader_workers: 5
+  save_interval: 10
+  sample_interval: 10
+  max_steps: -1
+  residual_training: false
+  gradient_checkpointing: true
+  save_path: "runs"
+
+  # Conditions: background image only; distance map is the training target.
+  condition_type:
+    - "background"
+
+  dataset:
+    type: "param_condition"
+    condition_size:
+      - 512
+      - 512
+    target_size:
+      - 512
+      - 512
+    drop_text_prob: 0.1
+    drop_image_prob: 0.1
+    list_file: "/home/libaoluo/dataset/param_condition/list.txt"
+    root_dir: "/home/libaoluo/dataset/opensourse_datasets"
+    prompt: ""
+
+    # Parameter vector settings.
+    param_order: ["length", "avg_width", "max_width", "count", "shape", "branch"]
+    param_scale:
+      length: 512
+      avg_width: 20
+      max_width: 40
+      count: 10
+      orientation: 360
+      branch: 5
+    param_categories:
+      shape: ["Horizontal", "vertical", "diagonal", "mesh-like"]
+
+  wandb:
+    project: "OminiControl"
+
+  lora_config:
+    r: 32
+    lora_alpha: 32
+    init_lora_weights: "gaussian"
+    target_modules: "(.*x_embedder|.*(?<!single_)transformer_blocks\\.[0-9]+\\.norm1\\.linear|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_k|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_q|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_v|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_out\\.0|.*(?<!single_)transformer_blocks\\.[0-9]+\\.ff\\.net\\.2|.*single_transformer_blocks\\.[0-9]+\\.norm\\.linear|.*single_transformer_blocks\\.[0-9]+\\.proj_mlp|.*single_transformer_blocks\\.[0-9]+\\.proj_out|.*single_transformer_blocks\\.[0-9]+\\.attn.to_k|.*single_transformer_blocks\\.[0-9]+\\.attn.to_q|.*single_transformer_blocks\\.[0-9]+\\.attn.to_v|.*single_transformer_blocks\\.[0-9]+\\.attn.to_out)"
+
+  optimizer:
+    type: "Prodigy"
+    params:
+      lr: 1
+      use_bias_correction: true
+      safeguard_warmup: true
+      weight_decay: 0.01
