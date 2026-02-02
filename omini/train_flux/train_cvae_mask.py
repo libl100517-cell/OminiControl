@@ -7,6 +7,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from diffusers.pipelines import FluxPipeline
+from PIL import Image
 
 from .trainer import get_config
 from .train_param_condition import ParamConditionDataset
@@ -149,6 +150,17 @@ def decode_mask(pipe: FluxPipeline, latents: torch.Tensor, device, dtype):
     return images.to(device).to(dtype)
 
 
+def save_sample(pipe, generator, p_vec, device, dtype, save_path, step):
+    with torch.no_grad():
+        latent = torch.randn([1, generator.latent_dim], device=device, dtype=dtype)
+        z_hat = generator(latent, p_vec[:1])
+        recon = decode_mask(pipe, z_hat, device, dtype)
+        os.makedirs(save_path, exist_ok=True)
+        out_path = os.path.join(save_path, f"sample_step_{step}.png")
+        image = (recon[0].permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+        Image.fromarray(image).save(out_path)
+
+
 def main():
     config = get_config()
     training_config = config["train"]
@@ -224,6 +236,9 @@ def main():
     total_steps = 0
     max_steps = training_config.get("max_steps", -1)
     epochs = training_config.get("epochs", 1)
+    save_interval = training_config.get("save_interval", 1000)
+    sample_interval = training_config.get("sample_interval", 1000)
+    save_path = training_config.get("save_path", "runs_cvae")
 
     for epoch in range(epochs):
         for batch in loader:
@@ -273,12 +288,35 @@ def main():
                     f"KL {kl.item():.4f} (w={kl_weight:.3f})"
                 )
 
+            if total_steps % sample_interval == 0:
+                save_sample(
+                    pipe,
+                    generator,
+                    p_vec,
+                    device,
+                    dtype,
+                    os.path.join(save_path, "samples"),
+                    total_steps,
+                )
+
+            if total_steps % save_interval == 0:
+                os.makedirs(save_path, exist_ok=True)
+                torch.save(
+                    {
+                        "param_embed": param_embed.state_dict(),
+                        "posterior": posterior.state_dict(),
+                        "prior": prior.state_dict(),
+                        "generator": generator.state_dict(),
+                        "config": cvae_cfg,
+                    },
+                    os.path.join(save_path, f"cvae_checkpoint_{total_steps}.pt"),
+                )
+
             if max_steps > 0 and total_steps >= max_steps:
                 break
         if max_steps > 0 and total_steps >= max_steps:
             break
 
-    save_path = training_config.get("save_path", "runs_cvae")
     os.makedirs(save_path, exist_ok=True)
     torch.save(
         {
