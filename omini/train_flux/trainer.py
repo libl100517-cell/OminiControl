@@ -16,7 +16,7 @@ from typing import List
 
 import prodigyopt
 
-from ..pipeline.flux_omini import transformer_forward, encode_images
+from ..pipeline.flux_omini import append_text_embeddings, transformer_forward, encode_images
 
 
 def get_rank():
@@ -82,10 +82,33 @@ class OminiModel(L.LightningModule):
         self.adapter_names = adapter_names
         self.adapter_set = set([each for each in adapter_names if each is not None])
 
+        self.param_condition_config = model_config.get("param_condition", {})
+        self.param_mlp = None
+        if self.param_condition_config.get("enabled", False):
+            input_dim = int(self.param_condition_config.get("vector_dim", 0))
+            hidden_dim = int(self.param_condition_config.get("hidden_dim", 128))
+            embed_dim = self.param_condition_config.get("embed_dim")
+            if embed_dim is None:
+                embed_dim = self._resolve_text_embed_dim()
+            if input_dim <= 0:
+                raise ValueError("param_condition.vector_dim must be > 0 when enabled.")
+            self.param_mlp = torch.nn.Sequential(
+                torch.nn.Linear(input_dim, hidden_dim),
+                torch.nn.SiLU(),
+                torch.nn.Linear(hidden_dim, embed_dim),
+            )
+
         # Initialize LoRA layers
         self.lora_layers = self.init_lora(lora_path, lora_config)
 
         self.to(device).to(dtype)
+
+    def _resolve_text_embed_dim(self) -> int:
+        for attr in ("cross_attention_dim", "joint_attention_dim", "hidden_size"):
+            value = getattr(self.transformer.config, attr, None)
+            if value is not None:
+                return int(value)
+        raise ValueError("Unable to resolve text embedding dimension for param_condition.")
 
     def init_lora(self, lora_path: str, lora_config: dict):
         assert lora_path or lora_config
@@ -113,6 +136,9 @@ class OminiModel(L.LightningModule):
                 ),
                 safe_serialization=True,
             )
+        if self.param_mlp is not None:
+            os.makedirs(path, exist_ok=True)
+            torch.save(self.param_mlp.state_dict(), os.path.join(path, "param_mlp.pt"))
 
     def configure_optimizers(self):
         # Freeze the transformer
@@ -120,7 +146,9 @@ class OminiModel(L.LightningModule):
         opt_config = self.optimizer_config
 
         # Set the trainable parameters
-        self.trainable_params = self.lora_layers
+        self.trainable_params = list(self.lora_layers)
+        if self.param_mlp is not None:
+            self.trainable_params += list(self.param_mlp.parameters())
 
         # Unfreeze trainable parameters
         for p in self.trainable_params:
@@ -281,6 +309,13 @@ class OminiModel(L.LightningModule):
                 max_sequence_length=self.model_config.get("max_sequence_length", 512),
                 lora_scale=None,
             )
+            param_vector = batch.get("param_vector")
+            if self.param_mlp is not None and param_vector is not None:
+                param_vector = param_vector.to(self.device).to(prompt_embeds.dtype)
+                extra_prompt_embeds = self.param_mlp(param_vector)
+                prompt_embeds, text_ids = append_text_embeddings(
+                    prompt_embeds, text_ids, extra_prompt_embeds
+                )
 
             # Prepare t and x_t
             t = torch.sigmoid(torch.randn((imgs.shape[0],), device=self.device))
@@ -516,11 +551,18 @@ class TrainingCallback(L.Callback):
                 eta_seconds = remaining_steps * avg_step_time
             else:
                 eta_seconds = 0.0
+            mask_loss = getattr(pl_module, "mask_loss", None)
+            nonmask_loss = getattr(pl_module, "nonmask_loss", None)
+            mask_loss_str = (
+                f", MaskLoss: {mask_loss:.4f}, NonmaskLoss: {nonmask_loss:.4f}"
+                if mask_loss is not None and nonmask_loss is not None
+                else ""
+            )
             print(
                 "Epoch: "
                 f"{trainer.current_epoch}, Steps: {self.total_steps}, "
-                f"Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}, "
-                f"MaskLoss: {pl_module.mask_loss:.4f}, NonmaskLoss: {pl_module.nonmask_loss:.4f}, "
+                f"Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}"
+                f"{mask_loss_str}, "
                 f"Gradient size: {gradient_size:.4f}, Max gradient size: "
                 f"{max_gradient_size:.4f}, Elapsed: {elapsed_seconds:.1f}s, "
                 f"ETA: {eta_seconds:.1f}s"
@@ -613,6 +655,10 @@ def train(dataset, trainable_model, config, test_function):
             )
 
     # Initialize trainer
+    param_condition = (
+        config.get("model", {}).get("param_condition", {}).get("enabled", False)
+    )
+    strategy = "ddp_find_unused_parameters_true" if param_condition else "ddp"
     trainer = L.Trainer(
         accumulate_grad_batches=training_config["accumulate_grad_batches"],
         callbacks=callbacks if is_main_process else [],
@@ -622,6 +668,7 @@ def train(dataset, trainable_model, config, test_function):
         max_steps=training_config.get("max_steps", -1),
         max_epochs=training_config.get("max_epochs", -1),
         gradient_clip_val=training_config.get("gradient_clip_val", 0.5),
+        strategy=strategy,
     )
 
     setattr(trainer, "training_config", training_config)
