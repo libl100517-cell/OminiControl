@@ -551,11 +551,18 @@ class TrainingCallback(L.Callback):
                 eta_seconds = remaining_steps * avg_step_time
             else:
                 eta_seconds = 0.0
+            mask_loss = getattr(pl_module, "mask_loss", None)
+            nonmask_loss = getattr(pl_module, "nonmask_loss", None)
+            mask_loss_str = (
+                f", MaskLoss: {mask_loss:.4f}, NonmaskLoss: {nonmask_loss:.4f}"
+                if mask_loss is not None and nonmask_loss is not None
+                else ""
+            )
             print(
                 "Epoch: "
                 f"{trainer.current_epoch}, Steps: {self.total_steps}, "
-                f"Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}, "
-                f"MaskLoss: {pl_module.mask_loss:.4f}, NonmaskLoss: {pl_module.nonmask_loss:.4f}, "
+                f"Batch: {batch_idx}, Loss: {pl_module.log_loss:.4f}"
+                f"{mask_loss_str}, "
                 f"Gradient size: {gradient_size:.4f}, Max gradient size: "
                 f"{max_gradient_size:.4f}, Elapsed: {elapsed_seconds:.1f}s, "
                 f"ETA: {eta_seconds:.1f}s"
@@ -648,6 +655,10 @@ def train(dataset, trainable_model, config, test_function):
             )
 
     # Initialize trainer
+    param_condition = (
+        config.get("model", {}).get("param_condition", {}).get("enabled", False)
+    )
+    strategy = "ddp_find_unused_parameters_true" if param_condition else "ddp"
     trainer = L.Trainer(
         accumulate_grad_batches=training_config["accumulate_grad_batches"],
         callbacks=callbacks if is_main_process else [],
@@ -657,6 +668,7 @@ def train(dataset, trainable_model, config, test_function):
         max_steps=training_config.get("max_steps", -1),
         max_epochs=training_config.get("max_epochs", -1),
         gradient_clip_val=training_config.get("gradient_clip_val", 0.5),
+        strategy=strategy,
     )
 
     setattr(trainer, "training_config", training_config)

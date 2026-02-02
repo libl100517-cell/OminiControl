@@ -74,7 +74,8 @@ def _build_param_vector(
 
 def _distance_map(mask: Image.Image) -> Image.Image:
     mask_np = np.array(mask, dtype=np.uint8)
-    inv = 255 - mask_np
+    mask_bin = (mask_np > 0).astype(np.uint8) * 255
+    inv = 255 - mask_bin
     dist = cv2.distanceTransform(inv, cv2.DIST_L2, 3)
     max_val = dist.max() if dist.max() > 0 else 1.0
     dist = dist / max_val
@@ -207,9 +208,7 @@ class ParamConditionDataset(torch.utils.data.Dataset):
         param_vector = _build_param_vector(
             params, self.param_order, self.param_scale, self.param_categories
         )
-        distance = _distance_map(mask)
-
-        distance_rgb = distance.resize(self.target_size).convert("RGB")
+        mask_rgb = mask.resize(self.target_size).convert("RGB")
         background = background.resize(self.condition_size)
 
         drop_text = random.random() < self.drop_text_prob
@@ -230,7 +229,7 @@ class ParamConditionDataset(torch.utils.data.Dataset):
             ]
 
         return_dict = {
-            "image": self.to_tensor(distance_rgb),
+            "image": self.to_tensor(mask_rgb),
             "description": description,
             "param_vector": torch.tensor(param_vector, dtype=torch.float32),
             **({"pil_image": [image, *condition_imgs]} if self.return_pil_image else {}),
@@ -278,7 +277,6 @@ def test_function(model, save_path, file_name):
         dataset_config.get("param_scale", {}),
         dataset_config.get("param_categories", {}),
     )
-    distance = _distance_map(mask)
 
     condition_list = []
     for i, c_type in enumerate(condition_type):
