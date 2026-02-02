@@ -6,7 +6,7 @@ import numpy as np
 
 import torchvision.transforms as T
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 # from datasets import load_dataset
 
@@ -198,6 +198,31 @@ class ImageMultiConditionDataset(ImageConditionDataset):
         return return_dict
 
 
+def _apply_random_dilate_mask(
+    mask: Image.Image,
+    dilate_choices: list[int],
+    transition_value: float,
+) -> Image.Image:
+    if not dilate_choices:
+        return mask
+    pixels = random.choice(dilate_choices)
+    if pixels <= 0:
+        return mask
+    kernel_size = pixels * 2 + 1
+    dilated = mask.filter(ImageFilter.MaxFilter(kernel_size))
+    orig = np.array(mask, dtype=np.uint8)
+    dil = np.array(dilated, dtype=np.uint8)
+    orig_bin = orig > 0
+    dil_bin = dil > 0
+    expanded = dil_bin & ~orig_bin
+    transition_value = int(round(255 * float(transition_value)))
+    transition_value = max(0, min(255, transition_value))
+    out = orig_bin.astype(np.uint8) * 255
+    if transition_value > 0:
+        out[expanded] = transition_value
+    return Image.fromarray(out, mode="L")
+
+
 class FillMaskMultiConditionDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -210,6 +235,9 @@ class FillMaskMultiConditionDataset(torch.utils.data.Dataset):
         drop_image_prob: float = 0.1,
         return_pil_image: bool = False,
         position_scale=1.0,
+        mask_random_dilate: bool = False,
+        mask_dilate_choices: list[int] | None = None,
+        mask_dilate_transition: float = 0.5,
     ):
         self.root_dir = Path(root_dir)
         self.image_paths = self._load_paths(list_file)
@@ -220,6 +248,9 @@ class FillMaskMultiConditionDataset(torch.utils.data.Dataset):
         self.drop_image_prob = drop_image_prob
         self.return_pil_image = return_pil_image
         self.position_scale = position_scale
+        self.mask_random_dilate = mask_random_dilate
+        self.mask_dilate_choices = mask_dilate_choices or []
+        self.mask_dilate_transition = mask_dilate_transition
 
         self.to_tensor = T.ToTensor()
 
@@ -264,6 +295,12 @@ class FillMaskMultiConditionDataset(torch.utils.data.Dataset):
         if background.size != image.size:
             background = background.resize(image.size, Image.BICUBIC)
         mask = mask.point(lambda v: 255 if v > 0 else 0)
+        if self.mask_random_dilate:
+            mask = _apply_random_dilate_mask(
+                mask,
+                self.mask_dilate_choices,
+                self.mask_dilate_transition,
+            )
 
         image = image.resize(self.target_size)
         background = background.resize(self.condition_size)
@@ -341,6 +378,12 @@ def test_function(model, save_path, file_name):
         if mask.size != image.size:
             mask = mask.resize(image.size, Image.NEAREST)
         mask = mask.point(lambda v: 255 if v > 0 else 0)
+        if model.training_config["dataset"].get("mask_random_dilate", False):
+            mask = _apply_random_dilate_mask(
+                mask,
+                model.training_config["dataset"].get("mask_dilate_choices", []),
+                model.training_config["dataset"].get("mask_dilate_transition", 0.5),
+            )
         background_path = root_dir.joinpath(
             *["images_bg" if part == "images" else part for part in parts]
         )
@@ -436,6 +479,9 @@ def main():
             drop_text_prob=dataset_config["drop_text_prob"],
             drop_image_prob=dataset_config["drop_image_prob"],
             position_scale=dataset_config.get("position_scale", 1.0),
+            mask_random_dilate=dataset_config.get("mask_random_dilate", False),
+            mask_dilate_choices=dataset_config.get("mask_dilate_choices", []),
+            mask_dilate_transition=dataset_config.get("mask_dilate_transition", 0.5),
         )
     # else:
     #     dataset = load_dataset(

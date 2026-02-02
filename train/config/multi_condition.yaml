@@ -44,6 +44,12 @@ train:
       - 512
     drop_text_prob: 0.1
     drop_image_prob: 0.1
+    # Optional mask dilation for multi-condition training.
+    # When enabled, mask is randomly dilated by the listed pixels and the expanded
+    # ring is set to mask_dilate_transition (e.g. 0.5) for smooth transition.
+    mask_random_dilate: false
+    mask_dilate_choices: [1, 3, 5, 7, 9]
+    mask_dilate_transition: 0.5
     # For fill_mask datasets:
     # list_file: "/home/libaoluo/sam2/test_flux_part.txt"
     list_file: "/home/libaoluo/dataset/dataset_txt/CDLN1k.txt"

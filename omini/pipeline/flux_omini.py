@@ -36,6 +36,35 @@ def clip_hidden_states(hidden_states: torch.FloatTensor) -> torch.FloatTensor:
     return hidden_states
 
 
+def append_text_embeddings(
+    prompt_embeds: torch.FloatTensor,
+    text_ids: torch.FloatTensor,
+    extra_embeds: Optional[torch.FloatTensor],
+) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+    if extra_embeds is None:
+        return prompt_embeds, text_ids
+    if extra_embeds.ndim == 2:
+        extra_embeds = extra_embeds.unsqueeze(1)
+    if extra_embeds.ndim != 3:
+        raise ValueError("extra_embeds must have shape [B, D] or [B, T, D].")
+    prompt_embeds = torch.cat([prompt_embeds, extra_embeds], dim=1)
+
+    extra_tokens = extra_embeds.shape[1]
+    if text_ids is None:
+        return prompt_embeds, text_ids
+    if text_ids.ndim != 2:
+        raise ValueError("text_ids must have shape [T, K].")
+    last_id = text_ids[-1].clone()
+    new_ids = []
+    for i in range(extra_tokens):
+        next_id = last_id.clone()
+        if next_id.numel() > 1:
+            next_id[1] = next_id[1] + (i + 1)
+        new_ids.append(next_id)
+    text_ids = torch.cat([text_ids, torch.stack(new_ids, dim=0)], dim=0)
+    return prompt_embeds, text_ids
+
+
 def encode_images(pipeline: FluxPipeline, images: torch.Tensor):
     """
     Encodes the images into tokens and ids for FLUX pipeline.
@@ -472,6 +501,7 @@ def generate(
     latents: Optional[torch.FloatTensor] = None,
     prompt_embeds: Optional[torch.FloatTensor] = None,
     pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+    extra_prompt_embeds: Optional[torch.FloatTensor] = None,
     output_type: Optional[str] = "pil",
     return_dict: bool = True,
     joint_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -533,6 +563,9 @@ def generate(
         device=device,
         num_images_per_prompt=num_images_per_prompt,
         max_sequence_length=max_sequence_length,
+    )
+    prompt_embeds, text_ids = append_text_embeddings(
+        prompt_embeds, text_ids, extra_prompt_embeds
     )
 
     # Prepare latent variables
