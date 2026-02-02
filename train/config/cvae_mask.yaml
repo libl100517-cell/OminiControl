@@ -1,0 +1,51 @@
+flux_path: "/home/libaoluo/sam2/OminiControl/flux"
+dtype: "bfloat16"
+
+model:
+  cvae:
+    param_dim: 6
+    param_embed_dim: 128
+    latent_dim: 64
+    best_of_k: 3
+    kl_weight: 1.0
+    kl_warmup_steps: 1000
+
+train:
+  batch_size: 4
+  dataloader_workers: 4
+  epochs: 5
+  max_steps: -1
+  lr: 0.0001
+  log_interval: 10
+  save_interval: 500
+  sample_interval: 500
+  save_path: "runs_cvae"
+  device: "cuda"
+
+  condition_type:
+    - "background"
+
+  dataset:
+    type: "param_condition"
+    condition_size:
+      - 512
+      - 512
+    target_size:
+      - 512
+      - 512
+    drop_text_prob: 0.0
+    drop_image_prob: 0.0
+    list_file: "/home/libaoluo/dataset/param_condition/list.txt"
+    root_dir: "/home/libaoluo/dataset/opensourse_datasets"
+    prompt: ""
+
+    param_order: ["length", "avg_width", "max_width", "count", "shape", "branch"]
+    param_scale:
+      length: 512
+      avg_width: 20
+      max_width: 40
+      count: 10
+      orientation: 360
+      branch: 5
+    param_categories:
+      shape: ["Horizontal", "vertical", "diagonal", "mesh-like"]

@@ -3,9 +3,10 @@ import os
 from pathlib import Path
 
 import torch
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageOps
 
 from .train_spatial_alignment import FillMaskDataset
+from .train_multi_condition import _apply_random_dilate_mask
 from .trainer import get_config
 from ..pipeline.flux_omini import Condition, generate
 from diffusers.pipelines import FluxPipeline
@@ -124,7 +125,12 @@ def main():
         if background.size != image.size:
             background = background.resize(image.size, Image.BICUBIC)
         mask = mask.point(lambda v: 255 if v > 0 else 0)
-        mask = mask.filter(ImageFilter.MaxFilter(5))
+        if dataset_config.get("mask_random_dilate", False):
+            mask = _apply_random_dilate_mask(
+                mask,
+                dataset_config.get("mask_dilate_choices", []),
+                dataset_config.get("mask_dilate_transition", 0.5),
+            )
 
         masked_image = Image.composite(
             Image.new("RGB", image.size, (0, 0, 0)),
