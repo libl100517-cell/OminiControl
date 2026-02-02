@@ -5,12 +5,18 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+import torchvision.transforms as T
 
-from diffusers.pipelines import FluxPipeline
+from diffusers import AutoencoderKL
 from PIL import Image
 
 from .trainer import get_config
-from .train_param_condition import ParamConditionDataset
+from .train_param_condition import (
+    _build_param_vector,
+    _estimate_mask_params,
+    _normalize_path,
+    _resolve_mask_path,
+)
 
 
 @dataclass
@@ -122,6 +128,48 @@ class ParamEmbed(nn.Module):
         return self.net(params)
 
 
+class CvaeMaskDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        list_file: str,
+        root_dir: str,
+        target_size=(512, 512),
+        param_order=None,
+        param_scale=None,
+        param_categories=None,
+    ):
+        self.root_dir = root_dir
+        self.target_size = target_size
+        self.param_order = param_order or []
+        self.param_scale = param_scale or {}
+        self.param_categories = param_categories or {}
+        self.to_tensor = T.ToTensor()
+        self.image_paths = self._load_paths(list_file)
+
+    def _load_paths(self, list_file: str) -> list[str]:
+        with open(list_file, "r", encoding="utf-8") as handle:
+            return [line.strip() for line in handle if line.strip()]
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        image_rel = self.image_paths[idx]
+        normalized = _normalize_path(image_rel)
+        mask_path = _resolve_mask_path(self.root_dir, normalized)
+        mask = Image.open(mask_path).convert("L")
+        mask = mask.point(lambda v: 255 if v > 0 else 0)
+        mask_rgb = mask.resize(self.target_size).convert("RGB")
+        params = _estimate_mask_params(mask)
+        param_vector = _build_param_vector(
+            params, self.param_order, self.param_scale, self.param_categories
+        )
+        return {
+            "image": self.to_tensor(mask_rgb),
+            "param_vector": torch.tensor(param_vector, dtype=torch.float32),
+        }
+
+
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     eps = torch.randn_like(mu)
     return mu + torch.exp(0.5 * logvar) * eps
@@ -136,25 +184,25 @@ def kl_divergence(mu_q, logvar_q, mu_p, logvar_p):
     ).sum(dim=-1)
 
 
-def encode_mask(pipe: FluxPipeline, mask: torch.Tensor, device, dtype):
-    mask = pipe.image_processor.preprocess(mask).to(device).to(dtype)
-    latents = pipe.vae.encode(mask).latent_dist.sample()
-    latents = (latents - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+def encode_mask(vae: AutoencoderKL, mask: torch.Tensor, device, dtype):
+    mask = (mask * 2 - 1).to(device).to(dtype)
+    latents = vae.encode(mask).latent_dist.sample()
+    latents = (latents - vae.config.shift_factor) * vae.config.scaling_factor
     return latents
 
 
-def decode_mask(pipe: FluxPipeline, latents: torch.Tensor, device, dtype):
-    latents = latents / pipe.vae.config.scaling_factor + pipe.vae.config.shift_factor
-    images = pipe.vae.decode(latents).sample
+def decode_mask(vae: AutoencoderKL, latents: torch.Tensor, device, dtype):
+    latents = latents / vae.config.scaling_factor + vae.config.shift_factor
+    images = vae.decode(latents).sample
     images = (images / 2 + 0.5).clamp(0, 1)
     return images.to(device).to(dtype)
 
 
-def save_sample(pipe, generator, p_vec, device, dtype, save_path, step):
+def save_sample(vae, generator, p_vec, device, dtype, save_path, step):
     with torch.no_grad():
         latent = torch.randn([1, generator.latent_dim], device=device, dtype=dtype)
         z_hat = generator(latent, p_vec[:1])
-        recon = decode_mask(pipe, z_hat, device, dtype)
+        recon = decode_mask(vae, z_hat, device, dtype)
         os.makedirs(save_path, exist_ok=True)
         out_path = os.path.join(save_path, f"sample_step_{step}.png")
         image = (recon[0].permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
@@ -168,19 +216,13 @@ def main():
     device = torch.device(training_config.get("device", "cuda"))
     dtype = getattr(torch, config["dtype"])
 
-    dataset = ParamConditionDataset(
+    dataset = CvaeMaskDataset(
         list_file=dataset_config["list_file"],
         root_dir=dataset_config["root_dir"],
-        condition_size=dataset_config["condition_size"],
         target_size=dataset_config["target_size"],
-        condition_type=training_config["condition_type"],
-        drop_text_prob=dataset_config["drop_text_prob"],
-        drop_image_prob=dataset_config["drop_image_prob"],
-        position_scale=dataset_config.get("position_scale", 1.0),
         param_order=dataset_config.get("param_order", []),
         param_scale=dataset_config.get("param_scale", {}),
         param_categories=dataset_config.get("param_categories", {}),
-        prompt=dataset_config.get("prompt", ""),
     )
 
     loader = DataLoader(
@@ -190,15 +232,15 @@ def main():
         num_workers=training_config.get("dataloader_workers", 4),
     )
 
-    pipe: FluxPipeline = FluxPipeline.from_pretrained(
-        config["flux_path"], torch_dtype=dtype
+    vae: AutoencoderKL = AutoencoderKL.from_pretrained(
+        config["flux_path"], subfolder="vae", torch_dtype=dtype
     ).to(device)
-    pipe.vae.eval()
-    pipe.vae.requires_grad_(False)
+    vae.eval()
+    vae.requires_grad_(False)
 
     sample_batch = next(iter(loader))
     mask_sample = sample_batch["image"].to(device)
-    latents_sample = encode_mask(pipe, mask_sample, device, dtype)
+    latents_sample = encode_mask(vae, mask_sample, device, dtype)
     latent_channels = latents_sample.shape[1]
     latent_height = latents_sample.shape[2]
     latent_width = latents_sample.shape[3]
@@ -246,7 +288,7 @@ def main():
             masks = batch["image"].to(device)
             param_vec = batch["param_vector"].to(device)
 
-            z_gt = encode_mask(pipe, masks, device, dtype)
+            z_gt = encode_mask(vae, masks, device, dtype)
             z_vec = z_gt.mean(dim=(2, 3))
 
             p_vec = param_embed(param_vec)
@@ -258,7 +300,7 @@ def main():
                 for _ in range(cvae_cfg.best_of_k):
                     latent = reparameterize(mu_q, logvar_q)
                     z_hat = generator(latent, p_vec)
-                    recon = decode_mask(pipe, z_hat, device, dtype)
+                    recon = decode_mask(vae, z_hat, device, dtype)
                     recons.append(recon)
                 recon_stack = torch.stack(recons, dim=0)
                 target = masks
@@ -267,7 +309,7 @@ def main():
             else:
                 latent = reparameterize(mu_q, logvar_q)
                 z_hat = generator(latent, p_vec)
-                recon = decode_mask(pipe, z_hat, device, dtype)
+                recon = decode_mask(vae, z_hat, device, dtype)
                 recon_loss = (recon - masks).abs().mean()
 
             kl = kl_divergence(mu_q, logvar_q, mu_p, logvar_p).mean()
@@ -290,7 +332,7 @@ def main():
 
             if total_steps % sample_interval == 0:
                 save_sample(
-                    pipe,
+                    vae,
                     generator,
                     p_vec,
                     device,
