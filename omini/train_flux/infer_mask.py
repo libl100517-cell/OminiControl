@@ -58,7 +58,43 @@ def parse_args():
         default="cuda:0",
         help="Device for inference.",
     )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="infer_vis_mask",
+        help="Directory to save mosaic outputs.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+    )
     return parser.parse_args()
+
+
+def mask_to_rgb_viz(mask_l: Image.Image) -> Image.Image:
+    mask_l = mask_l.convert("L")
+    return Image.merge("RGB", (mask_l, mask_l, mask_l))
+
+
+def overlay_red(base_rgb: Image.Image, mask_l: Image.Image, alpha: float = 0.45) -> Image.Image:
+    base = base_rgb.convert("RGBA")
+    mask_l = mask_l.convert("L")
+    a = mask_l.point(lambda v: int(v * alpha))
+    red = Image.new("RGBA", base.size, (255, 0, 0, 0))
+    red.putalpha(a)
+    out = Image.alpha_composite(base, red)
+    return out.convert("RGB")
+
+
+def make_2x2_mosaic(im00, im01, im10, im11) -> Image.Image:
+    w, h = im00.size
+    canvas = Image.new("RGB", (w * 2, h * 2))
+    canvas.paste(im00, (0, 0))
+    canvas.paste(im01, (w, 0))
+    canvas.paste(im10, (0, h))
+    canvas.paste(im11, (w, h))
+    return canvas
 
 
 def main():
@@ -105,10 +141,13 @@ def main():
             param_mlp.load_state_dict(torch.load(param_mlp_path, map_location=args.device))
         param_mlp.eval()
 
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     with open(list_file, "r", encoding="utf-8") as handle:
         image_paths = [line.strip() for line in handle if line.strip()]
 
-    for relative_path in image_paths:
+    for idx, relative_path in enumerate(image_paths):
         normalized_path = _normalize_path(relative_path)
         image_path = root_dir / normalized_path
         mask_path = _resolve_mask_path(root_dir, normalized_path)
@@ -116,8 +155,11 @@ def main():
 
         background = ImageOps.exif_transpose(Image.open(background_path)).convert("RGB")
         mask = ImageOps.exif_transpose(Image.open(mask_path)).convert("L")
+        image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
         if mask.size != background.size:
             mask = mask.resize(background.size, Image.NEAREST)
+        if image.size != background.size:
+            image = image.resize(background.size, Image.BICUBIC)
 
         params = _estimate_mask_params(mask)
         param_vector = _build_param_vector(
@@ -135,10 +177,11 @@ def main():
             vector_tensor = torch.tensor([param_vector], device=args.device, dtype=pipe.dtype)
             extra_prompt_embeds = param_mlp(vector_tensor)
 
-        generator = torch.Generator(device=args.device).manual_seed(42)
+        generator = torch.Generator(device=args.device).manual_seed(args.seed)
+        description = ""
         result = generate(
             pipe,
-            prompt=dataset_config.get("prompt", ""),
+            prompt=description,
             conditions=[condition],
             height=target_size[0],
             width=target_size[1],
@@ -148,14 +191,19 @@ def main():
             extra_prompt_embeds=extra_prompt_embeds,
         )
 
-        output_parts = [
-            "images_mask_pred" if part == "images" else part
-            for part in Path(normalized_path).parts
-        ]
-        output_path = root_dir.joinpath(*output_parts)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_image = result.images[0].resize(background.size)
-        output_image.save(output_path)
+
+        bg_tile = background.copy()
+        mask_tile = mask_to_rgb_viz(mask)
+        gen_tile = output_image
+        overlay_tile = overlay_red(output_image, mask, alpha=0.45)
+        mosaic = make_2x2_mosaic(bg_tile, mask_tile, gen_tile, overlay_tile)
+
+        safe_name = normalized_path.replace("/", "__").replace("\\", "__")
+        out_path = out_dir / f"{idx:05d}__{safe_name}.jpg"
+        mosaic.save(out_path, quality=95)
+
+    print(f"Done. Saved {len(image_paths)} mosaics to: {out_dir}")
 
 
 if __name__ == "__main__":
