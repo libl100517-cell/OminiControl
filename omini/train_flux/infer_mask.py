@@ -139,6 +139,7 @@ def main():
         param_mlp_path = args.param_mlp_path or os.path.join(args.lora_path, "param_mlp.pt")
         if os.path.exists(param_mlp_path):
             param_mlp.load_state_dict(torch.load(param_mlp_path, map_location=args.device))
+        param_mlp = param_mlp.to(dtype=pipe.dtype)
         param_mlp.eval()
 
     out_dir = Path(args.out_dir)
@@ -174,7 +175,9 @@ def main():
 
         extra_prompt_embeds = None
         if param_mlp is not None:
-            vector_tensor = torch.tensor([param_vector], device=args.device, dtype=pipe.dtype)
+            vector_tensor = torch.tensor(
+                [param_vector], device=args.device, dtype=param_mlp[0].weight.dtype
+            )
             extra_prompt_embeds = param_mlp(vector_tensor)
 
         generator = torch.Generator(device=args.device).manual_seed(args.seed)
